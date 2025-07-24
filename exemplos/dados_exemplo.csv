@@ -1,0 +1,21 @@
+text,label,tipo_payload
+"Erro de sintaxe SQL: SELECT * FROM users WHERE id = '' OR '1'='1'",1,sqli
+"Error: You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near ''' at line 1",1,sqli
+"<script>alert('XSS');</script> foi encontrado na resposta",1,xss
+"Command executed: ls -la /etc/passwd",1,cmd_injection
+"O usuário não tem permissão para acessar /etc/passwd",0,cmd_injection
+"Login bem-sucedido. Bem-vindo administrador!",0,normal
+"A senha foi alterada com sucesso.",0,normal
+"O nome do produto é: Apple",0,normal
+"Nenhum resultado encontrado para sua busca.",0,normal
+"Bem-vindo ao nosso site! Por favor, faça login para continuar.",0,normal
+"404 - Página não encontrada",0,normal
+"Warning: mysqli_fetch_array() expects parameter 1 to be mysqli_result",1,sqli
+"uncaught exception: TypeError: Cannot read property 'value' of null",0,normal
+"UNION SELECT user,password FROM users-- foi executado com sucesso",1,sqli
+"exec(/bin/sh -c 'cat /etc/passwd') executado",1,cmd_injection
+"Error: Unclosed quotation mark after the character string",1,sqli
+"Você se conectou como: root@localhost",1,sqli
+"<img src=x onerror=alert(1)> foi renderizado",1,xss
+"mongodb query error: operator $ne cannot be at top-level",1,nosqli
+"O arquivo ../../../etc/passwd foi acessado",1,path_traversal

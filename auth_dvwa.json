@@ -1,0 +1,8 @@
+{
+    "login_url": "http://localhost/DVWA/login.php",
+    "username_field": "username",
+    "password_field": "password",
+    "username": "admin",
+    "password": "password",
+    "security_level": "low"
+}

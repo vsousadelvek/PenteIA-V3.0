@@ -1,6 +1,6 @@
-# PenteIA - Sistema de Coleta e Análise de Dados para IA de Segurança
+# PenteIA - Sistema de Coleta, Análise e Detecção de Vulnerabilidades com IA
 
-Este projeto é uma suite completa de ferramentas Python para coleta automatizada, processamento e visualização de dados de vulnerabilidades de segurança em ambientes de teste controlados. Os dados coletados e processados são fundamentais para treinar modelos de inteligência artificial capazes de detectar e classificar vulnerabilidades em aplicações web.
+Este projeto é uma suite completa de ferramentas Python para coleta automatizada, processamento, visualização e detecção de vulnerabilidades de segurança em aplicações web. O sistema combina técnicas tradicionais de segurança com inteligência artificial para identificar e classificar vulnerabilidades com alta precisão.
 
 ![PenteIA Logo](https://via.placeholder.com/800x200/0078D7/FFFFFF?text=PenteIA+Security+Data+Suite)
 
@@ -70,6 +70,29 @@ O coletor também suporta outros ambientes de teste populares. Confira os arquiv
 - **Análise comparativa** entre diferentes conjuntos de dados
 - **Exportação de visualizações** em formato PNG de alta resolução
 
+### Scanner de Vulnerabilidades (scanner.py)
+- **Detecção em tempo real** de vulnerabilidades usando IA
+- **Análise de links e formulários** para encontrar pontos de injeção
+- **Classificação automática** do tipo de vulnerabilidade
+- **Avaliação de gravidade** baseada em confiança do modelo
+- **Suporte a autenticação** em aplicações protegidas
+- **Relatórios detalhados** em formato JSON
+- **Interface colorida** no terminal para fácil interpretação
+- **Limiar de detecção ajustável** para controle de falsos positivos
+
+### Gerador de Dados Sintéticos (synthetic_data_generator.py)
+- **Geração automática** de dados de treinamento
+- **Suporte a múltiplos tipos** de vulnerabilidades:
+  - SQL Injection (SQLi)
+  - Cross-Site Scripting (XSS)
+  - Command Injection
+  - XPATH Injection
+  - NoSQL Injection
+  - Local/Remote File Inclusion
+- **Combinação com dados reais** para melhorar a qualidade do treinamento
+- **Download de dados públicos** de fontes confiáveis
+- **Balanceamento automático** do conjunto de dados
+
 ## 📋 Requisitos
 
 - Python 3.6 ou superior
@@ -84,6 +107,8 @@ O coletor também suporta outros ambientes de teste populares. Confira os arquiv
   - scikit-learn>=1.2.0 (opcional, para análise avançada)
   - tqdm>=4.64.0 (para indicadores de progresso)
   - colorama>=0.4.5 (para saída colorida no terminal)
+  - beautifulsoup4>=4.11.0 (para análise de HTML)
+  - tensorflow>=2.10.0 (para execução do modelo de IA)
 
 ## 🔧 Instalação
 
@@ -145,6 +170,36 @@ python data_collector.py
 python data_collector.py --config exemplos/config_webgoat.json
 ```
 
+### Coleta Avançada de Dados
+
+```bash
+# Coleta avançada com descoberta automática de páginas
+python collect_vulns.py --url http://localhost/DVWA/ --discover --recursive
+
+# Especificar profundidade de exploração
+python collect_vulns.py --url http://localhost/DVWA/ --discover --recursive --depth 3
+```
+
+### Download de Dados Públicos
+
+```bash
+# Baixar dados de vulnerabilidades de fontes públicas
+python download_vulns.py
+
+# Baixar uma fonte específica
+python download_vulns.py --source "PayloadsAllTheThings-SQLi"
+```
+
+### Geração de Dados Sintéticos
+
+```bash
+# Gerar dados sintéticos com configurações padrão
+python synthetic_data_generator.py
+
+# Gerar um número específico de exemplos
+python synthetic_data_generator.py --num_exemplos 5000
+```
+
 ### Processamento de Dados
 
 ```bash
@@ -158,14 +213,27 @@ python data_processor.py resultados/raw_data_20230615_120000.csv
 python data_processor.py --sensibilidade 2.0
 ```
 
-### Visualização de Dados
+### Treinamento do Modelo
 
 ```bash
-# Visualizar o dataset de treinamento mais recente
-python visualizador.py
+# Treinar o modelo com os dados processados
+python treinar_modelo_real.py
 
-# Visualizar um dataset específico
-python visualizador.py dados_treinamento/training_sqli.csv
+# Treinar com configurações específicas de memória
+python treinar_modelo_real.py --memoria_limitada
+```
+
+### Scanner de Vulnerabilidades
+
+```bash
+# Escanear uma URL em busca de vulnerabilidades
+python scanner.py --url http://localhost/DVWA/
+
+# Escanear com autenticação
+python scanner.py --url http://localhost/DVWA/ --auth auth_dvwa.json
+
+# Ajustar o limiar de detecção (maior valor = menos falsos positivos)
+python scanner.py --url http://localhost/DVWA/ --threshold 0.9
 ```
 
 ## 📊 Estrutura dos Resultados
@@ -237,6 +305,51 @@ O processador utiliza múltiplas técnicas para identificar vulnerabilidades:
 
 A sensibilidade da detecção pode ser ajustada com o parâmetro `--sensibilidade`.
 
+## 🔍 Scanner de Vulnerabilidades
+
+O módulo `scanner.py` é a aplicação prática do modelo de IA treinado, permitindo detectar vulnerabilidades em sistemas reais:
+
+### Características
+
+- **Detecção em tempo real**: Análise imediata de páginas web
+- **Crawling inteligente**: Identifica automaticamente links e formulários para teste
+- **Classificação por tipo**: Identifica o tipo específico de vulnerabilidade (SQL Injection, XSS, etc.)
+- **Avaliação de gravidade**: Classifica as vulnerabilidades como Crítica, Alta ou Média
+- **Interface amigável**: Saída colorida no terminal para fácil interpretação
+- **Relatórios detalhados**: Salvos em formato JSON para análise posterior
+
+### Formato dos relatórios
+
+Os relatórios são salvos em `relatorios/penteia_scan_[dominio]_[timestamp].json` e contêm:
+
+```json
+{
+  "url": "http://exemplo.com",
+  "timestamp": "2023-07-15T14:30:45.123456",
+  "total_tests": 156,
+  "total_vulnerabilities": 3,
+  "vulnerabilities": [
+    {
+      "vulnerable": true,
+      "probability": 0.97,
+      "severity": "CRÍTICA",
+      "type": "SQL Injection",
+      "url": "http://exemplo.com/busca?q=payload",
+      "payload": "' OR 1=1--"
+    }
+  ]
+}
+```
+
+### Interpretação dos resultados
+
+O scanner exibe resultados em tempo real com códigos de cores:
+- 🔴 **CRÍTICA**: Alta confiança (>95%) de vulnerabilidade explorável
+- 🟣 **ALTA**: Forte indicação (90-95%) de vulnerabilidade
+- 🟡 **MÉDIA**: Possível vulnerabilidade (80-90%)
+
+Um resumo completo é exibido ao final do escaneamento, facilitando a priorização de correções.
+
 #### Matriz de Indicadores de Detecção
 
 | Tipo de Vulnerabilidade | Indicadores Primários | Indicadores Secundários |
@@ -258,7 +371,7 @@ Os dados coletados podem ser usados para:
 
 ## 🔄 Arquitetura do Sistema
 
-O PenteIA é composto por três módulos principais que trabalham em conjunto:
+O PenteIA é composto por seis módulos principais que trabalham em conjunto:
 
 ```
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
@@ -269,13 +382,29 @@ O PenteIA é composto por três módulos principais que trabalham em conjunto:
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
 │  raw_data.csv   │────>│ training_data.csv│────>│   visualizações │
 └─────────────────┘     └─────────────────┘     └─────────────────┘
+                              │
+                              ▼
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│ synthetic_data  │────>│ treinar_modelo  │────>│     scanner     │
+└─────────────────┘     └─────────────────┘     └─────────────────┘
+                                                       │
+                                                       ▼
+                                                ┌─────────────────┐
+                                                │    relatórios    │
+                                                └─────────────────┘
 ```
 
-1. **Coleta de Dados**: O módulo `data_collector.py` interage com aplicações vulneráveis, enviando payloads e coletando respostas.
+1. **Coleta de Dados**: Os módulos `data_collector.py` e `collect_vulns.py` interagem com aplicações vulneráveis, enviando payloads e coletando respostas.
 
-2. **Processamento**: O módulo `data_processor.py` analisa os dados brutos, aplica heurísticas para rotulagem e gera datasets estruturados para treinamento.
+2. **Download e Geração de Dados**: Os módulos `download_vulns.py` e `synthetic_data_generator.py` obtêm dados adicionais de fontes públicas e geram dados sintéticos.
 
-3. **Visualização**: O módulo `visualizador.py` cria representações visuais dos dados processados para facilitar a análise e interpretação.
+3. **Processamento**: O módulo `data_processor.py` analisa os dados brutos, aplica heurísticas para rotulagem e gera datasets estruturados para treinamento.
+
+4. **Treinamento**: O módulo `treinar_modelo_real.py` treina o modelo de IA com os dados processados.
+
+5. **Visualização**: O módulo de visualização cria representações visuais dos dados processados para facilitar a análise e interpretação.
+
+6. **Scanner**: O módulo `scanner.py` utiliza o modelo treinado para detectar vulnerabilidades em tempo real em aplicações web alvo.
 
 Esta arquitetura modular permite que cada componente seja utilizado independentemente ou como parte do fluxo completo de trabalho.
 
@@ -307,6 +436,8 @@ Para dúvidas, sugestões ou colaborações, entre em contato através do GitHub
 
 <p align="center">
   Desenvolvido com ❤️ para a comunidade de segurança e IA<br>
-  <b>PenteIA v2.0</b> - Sistema de Coleta e Análise de Dados para Segurança<br>
+  <b>PenteIA v3.0</b> - Sistema de Coleta, Análise e Detecção de Vulnerabilidades<br>
   © 2023-2025 Todos os direitos reservados
 </p>
+
+> ⚠️ **AVISO ÉTICO**: Utilize esta ferramenta apenas em sistemas para os quais você tem permissão explícita para testar. O uso indevido pode violar leis de segurança cibernética.
