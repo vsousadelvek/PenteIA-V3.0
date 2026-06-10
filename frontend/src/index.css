@@ -1,0 +1,105 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  @apply bg-dark-900 text-gray-100 font-sans;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: #1a1a1a;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #444;
+  border-radius: 5px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}
+
+/* Animations */
+@keyframes pulse-glow {
+  0%, 100% {
+    box-shadow: 0 0 20px rgba(255, 68, 68, 0.3);
+  }
+  50% {
+    box-shadow: 0 0 40px rgba(255, 68, 68, 0.6);
+  }
+}
+
+.pulse-glow {
+  animation: pulse-glow 2s infinite;
+}
+
+@keyframes slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.slide-in {
+  animation: slide-in 0.3s ease-out;
+}
+
+/* Utility classes */
+.card-dark {
+  @apply bg-dark-800 border border-dark-700 rounded-lg;
+}
+
+.btn-red {
+  @apply px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors;
+}
+
+.btn-blue {
+  @apply px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors;
+}
+
+.btn-outline-red {
+  @apply px-4 py-2 border border-red-600 text-red-600 hover:bg-red-600 hover:text-white rounded-lg transition-colors;
+}
+
+.input-dark {
+  @apply bg-dark-700 border border-dark-600 text-gray-100 rounded-lg px-4 py-2 focus:outline-none focus:border-red-500;
+}
+
+.select-dark {
+  @apply bg-dark-700 border border-dark-600 text-gray-100 rounded-lg px-4 py-2 focus:outline-none focus:border-red-500 cursor-pointer;
+}
+
+.badge-red {
+  @apply inline-block bg-red-600 text-white px-3 py-1 rounded-full text-sm font-semibold;
+}
+
+.badge-green {
+  @apply inline-block bg-green-600 text-white px-3 py-1 rounded-full text-sm font-semibold;
+}
+
+.badge-yellow {
+  @apply inline-block bg-yellow-600 text-white px-3 py-1 rounded-full text-sm font-semibold;
+}
+
+.glow-text {
+  text-shadow: 0 0 20px rgba(255, 68, 68, 0.5);
+}
