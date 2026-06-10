@@ -1,0 +1,182 @@
+{% extends "base.html" %}
+
+{% block title %}Reporting - PenteIA v4.0{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-md-12">
+        <h2><i class="fas fa-file-pdf"></i> Report Generation</h2>
+        <p class="text-muted">Generate automated assessment reports</p>
+    </div>
+</div>
+
+<div class="row mb-4">
+    <div class="col-md-6">
+        <div class="card bg-dark border-secondary">
+            <div class="card-header bg-dark border-secondary">
+                <h5 class="mb-0"><i class="fas fa-edit text-info"></i> Report Configuration</h5>
+            </div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <label class="form-label">Report Title</label>
+                    <input type="text" class="form-control bg-secondary text-light" id="report-title"
+                           placeholder="Security Assessment Report">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Duration (hours)</label>
+                    <input type="number" class="form-control bg-secondary text-light" id="duration"
+                           value="8" min="1">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Risk Level</label>
+                    <select class="form-select bg-secondary text-light" id="risk-level">
+                        <option value="Low">Low</option>
+                        <option value="Medium">Medium</option>
+                        <option value="High" selected>High</option>
+                        <option value="Critical">Critical</option>
+                    </select>
+                </div>
+                <button class="btn btn-outline-success w-100" id="generate-btn">
+                    <i class="fas fa-cogs"></i> Generate Report
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-6">
+        <div class="card bg-dark border-secondary">
+            <div class="card-header bg-dark border-secondary">
+                <h5 class="mb-0"><i class="fas fa-file text-warning"></i> Export Formats</h5>
+            </div>
+            <div class="card-body">
+                <p class="text-muted mb-3">Available export formats:</p>
+                <div class="list-group">
+                    <div class="list-group-item bg-secondary text-light">
+                        <i class="fas fa-file-code text-info"></i> HTML (Web Format)
+                    </div>
+                    <div class="list-group-item bg-secondary text-light">
+                        <i class="fas fa-file-pdf text-danger"></i> PDF (Print Ready)
+                    </div>
+                    <div class="list-group-item bg-secondary text-light">
+                        <i class="fas fa-file-word text-primary"></i> DOCX (Editable)
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-12">
+        <div class="card bg-dark border-secondary">
+            <div class="card-header bg-dark border-secondary">
+                <h5 class="mb-0"><i class="fas fa-check text-success"></i> Generated Reports</h5>
+            </div>
+            <div class="card-body">
+                <div id="reports-list">
+                    <p class="text-muted">No reports generated yet</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>let generatedReports = [];
+
+document.addEventListener('DOMContentLoaded', function() {
+    document.getElementById('generate-btn').addEventListener('click', generateReport);
+});
+
+function generateReport() {
+    const title = document.getElementById('report-title').value;
+    const duration = document.getElementById('duration').value;
+    const riskLevel = document.getElementById('risk-level').value;
+
+    const findings = [
+        {
+            finding_id: 'F001',
+            technique_id: 'T1021.001',
+            title: 'RDP Exposure',
+            severity: 'high',
+            evidence: ['Port 3389 open', 'Weak password policy'],
+            affected_systems: ['SERVER-01'],
+            remediation: 'Enable MFA'
+        },
+        {
+            finding_id: 'F002',
+            technique_id: 'T1110.001',
+            title: 'Default Credentials',
+            severity: 'critical',
+            evidence: ['Admin account with default password'],
+            affected_systems: ['DATABASE-01'],
+            remediation: 'Change default credentials'
+        }
+    ];
+
+    fetch(`${API_BASE}/reporting/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            findings: findings,
+            duration: duration,
+            risk_level: riskLevel,
+            title: title
+        })
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.report_id) {
+            generatedReports.unshift({
+                id: data.report_id,
+                title: title,
+                findings: data.findings,
+                generated_at: new Date().toLocaleString()
+            });
+            updateReportsList();
+            alert('Report generated successfully!');
+        } else {
+            alert('Error generating report');
+        }
+    })
+    .catch(e => alert('Error: ' + e));
+}
+
+function updateReportsList() {
+    const list = document.getElementById('reports-list');
+    if (generatedReports.length === 0) {
+        list.innerHTML = '<p class="text-muted">No reports yet</p>';
+        return;
+    }
+
+    list.innerHTML = generatedReports.map(r => `
+        <div class="alert alert-secondary mb-2">
+            <div class="d-flex justify-content-between">
+                <strong>${r.title}</strong>
+                <small class="text-muted">${r.generated_at}</small>
+            </div>
+            <small>Findings: ${r.findings}</small>
+            <div class="mt-2">
+                <button class="btn btn-sm btn-outline-info" onclick="downloadReport('${r.id}', 'html')">
+                    <i class="fas fa-download"></i> HTML
+                </button>
+                <button class="btn btn-sm btn-outline-danger" onclick="downloadReport('${r.id}', 'pdf')">
+                    <i class="fas fa-download"></i> PDF
+                </button>
+                <button class="btn btn-sm btn-outline-primary" onclick="downloadReport('${r.id}', 'docx')">
+                    <i class="fas fa-download"></i> DOCX
+                </button>
+            </div>
+        </div>
+    `).join('');
+}
+
+function downloadReport(reportId, format) {
+    alert(`Downloading ${format.toUpperCase()} report: ${reportId}`);
+    // In production, would trigger actual file download
+}
+</script>
+{% endblock %}
+

@@ -1,0 +1,160 @@
+{% extends "base.html" %}
+
+{% block title %}Evasion Testing - PenteIA v4.0{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-md-12">
+        <h2><i class="fas fa-shield"></i> Evasion Testing</h2>
+        <p class="text-muted">Test evasion techniques in controlled environments</p>
+    </div>
+</div>
+
+<div class="row mb-4">
+    <div class="col-md-6">
+        <div class="card bg-dark border-danger">
+            <div class="card-header bg-dark border-danger">
+                <h5 class="mb-0"><i class="fas fa-search text-info"></i> Sandbox Detection</h5>
+            </div>
+            <div class="card-body">
+                <p class="text-muted mb-3">Check if execution environment is a sandbox or analysis platform</p>
+                <button class="btn btn-outline-info w-100" id="sandbox-check-btn">
+                    <i class="fas fa-magnifying-glass"></i> Check Environment
+                </button>
+                <div id="sandbox-result" class="mt-3" style="display: none;">
+                    <pre id="sandbox-output" class="text-light"></pre>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-6">
+        <div class="card bg-dark border-warning">
+            <div class="card-header bg-dark border-warning">
+                <h5 class="mb-0"><i class="fas fa-moon text-warning"></i> Sleep Obfuscation</h5>
+            </div>
+            <div class="card-body">
+                <p class="text-muted mb-3">Test memory-encrypted sleep with obfuscation</p>
+                <div class="mb-3">
+                    <label class="form-label">Duration (ms)</label>
+                    <input type="number" class="form-control bg-secondary text-light" id="sleep-duration"
+                           value="5000" min="1000" max="60000">
+                </div>
+                <button class="btn btn-outline-warning w-100" id="sleep-btn">
+                    <i class="fas fa-play"></i> Start Sleep
+                </button>
+                <div id="sleep-result" class="mt-3" style="display: none;">
+                    <pre id="sleep-output" class="text-light"></pre>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-12">
+        <div class="card bg-dark border-secondary">
+            <div class="card-header bg-dark border-secondary">
+                <h5 class="mb-0"><i class="fas fa-list text-success"></i> Test Results</h5>
+            </div>
+            <div class="card-body">
+                <div id="test-results">
+                    <p class="text-muted">Run tests above to see results</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>let testResults = [];
+
+document.addEventListener('DOMContentLoaded', function() {
+    document.getElementById('sandbox-check-btn').addEventListener('click', checkSandbox);
+    document.getElementById('sleep-btn').addEventListener('click', testSleep);
+});
+
+function checkSandbox() {
+    const btn = document.getElementById('sandbox-check-btn');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Checking...';
+
+    fetch(`${API_BASE}/evasion/sandbox-check`, { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+            document.getElementById('sandbox-result').style.display = 'block';
+            document.getElementById('sandbox-output').textContent = JSON.stringify(data, null, 2);
+
+            addTestResult('Sandbox Detection', data.is_sandboxed ? 'UNSAFE' : 'SAFE', data);
+
+            if (data.is_sandboxed) {
+                alert('⚠️ Sandbox detected: ' + data.detections.join(', '));
+            } else {
+                alert('✓ Environment appears safe');
+            }
+        })
+        .catch(e => {
+            alert('Error: ' + e);
+        })
+        .finally(() => {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-magnifying-glass"></i> Check Environment';
+        });
+}
+
+function testSleep() {
+    const duration = parseInt(document.getElementById('sleep-duration').value);
+    const btn = document.getElementById('sleep-btn');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Sleeping...';
+
+    fetch(`${API_BASE}/evasion/sleep-obfuscate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ duration: duration })
+    })
+    .then(r => r.json())
+    .then(data => {
+        document.getElementById('sleep-result').style.display = 'block';
+        document.getElementById('sleep-output').textContent = JSON.stringify(data, null, 2);
+
+        addTestResult('Sleep Obfuscation', 'SUCCESS', data);
+
+        alert(`Sleep test completed!\nRequested: ${data.duration_requested}ms\nActual: ${data.duration_actual}ms`);
+    })
+    .catch(e => alert('Error: ' + e))
+    .finally(() => {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-play"></i> Start Sleep';
+    });
+}
+
+function addTestResult(testName, status, data) {
+    testResults.unshift({
+        name: testName,
+        status: status,
+        timestamp: new Date().toLocaleString(),
+        data: data
+    });
+    updateTestResults();
+}
+
+function updateTestResults() {
+    const resultsDiv = document.getElementById('test-results');
+    resultsDiv.innerHTML = testResults.map(r => `
+        <div class="alert alert-${r.status === 'SAFE' ? 'success' : r.status === 'SUCCESS' ? 'info' : 'warning'} mb-2">
+            <div class="d-flex justify-content-between">
+                <strong>${r.name}</strong>
+                <span class="badge bg-${r.status === 'SAFE' || r.status === 'SUCCESS' ? 'success' : 'danger'}">
+                    ${r.status}
+                </span>
+            </div>
+            <small class="text-muted">${r.timestamp}</small>
+        </div>
+    `).join('');
+}
+</script>
+{% endblock %}
+

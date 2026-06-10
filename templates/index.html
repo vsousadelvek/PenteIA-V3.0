@@ -1,0 +1,178 @@
+{% extends "base.html" %}
+
+{% block title %}Painel - PenteIA v4.0{% endblock %}
+
+{% block extra_css %}{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-md-12">
+        <h1 class="display-4">
+            <i class="fas fa-tachometer-alt text-danger"></i> Painel PenteIA v4.0
+        </h1>
+        <p class="text-muted">Plataforma Red Team - Apenas Testes Autorizados</p>
+    </div>
+</div>
+
+<!-- Status do Sistema -->
+<div class="row mb-4">
+    <div class="col-md-4">
+        <div class="card bg-dark border-success">
+            <div class="card-body">
+                <h5 class="card-title"><i class="fas fa-check-circle text-success"></i> Status do Sistema</h5>
+                <p id="system-status" class="text-success">🟢 Online</p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card bg-dark border-info">
+            <div class="card-body">
+                <h5 class="card-title"><i class="fas fa-cube text-info"></i> Módulos Ativos</h5>
+                <p id="modules-count" class="text-info h4">5</p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card bg-dark border-warning">
+            <div class="card-body">
+                <h5 class="card-title"><i class="fas fa-list text-warning"></i> Operações</h5>
+                <p id="Operações-count" class="text-warning h4">0</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Acesso Rápido -->
+<div class="row mb-4">
+    <div class="col-md-12">
+        <h4 class="mb-3">Acesso Rápido</h4>
+        <div class="row">
+            <div class="col-md-3">
+                <a href="/ddos" class="btn btn-outline-danger btn-block mb-2" style="display: block; width: 100%;">
+                    <i class="fas fa-shield-virus"></i> DDoS Testing
+                </a>
+            </div>
+            <div class="col-md-3">
+                <a href="/modules" class="btn btn-outline-info btn-block mb-2" style="display: block; width: 100%;">
+                    <i class="fas fa-cube"></i> Modules
+                </a>
+            </div>
+            <div class="col-md-3">
+                <a href="/c2" class="btn btn-outline-warning btn-block mb-2" style="display: block; width: 100%;">
+                    <i class="fas fa-network-wired"></i> C2 Beacon
+                </a>
+            </div>
+            <div class="col-md-3">
+                <a href="/bas" class="btn btn-outline-success btn-block mb-2" style="display: block; width: 100%;">
+                    <i class="fas fa-crosshairs"></i> BAS
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Modules Overview -->
+<div class="row">
+    <div class="col-md-12">
+        <h4 class="mb-3">Módulos Disponíveis</h4>
+        <div class="row">
+            <div class="col-md-6">
+                <div class="card bg-dark border-secondary mb-3">
+                    <div class="card-body">
+                        <h5 class="card-title"><i class="fas fa-shield"></i> Evasão EDR</h5>
+                        <p class="card-text text-muted">Gadgets ROP, syscalls, module stomping</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card bg-dark border-secondary mb-3">
+                    <div class="card-body">
+                        <h5 class="card-title"><i class="fas fa-memory"></i> Evasão de Memória</h5>
+                        <p class="card-text text-muted">Ofuscação sleep, stack spoofing, criptografia</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card bg-dark border-secondary mb-3">
+                    <div class="card-body">
+                        <h5 class="card-title"><i class="fas fa-eye-slash"></i> Bypass de Telemetria</h5>
+                        <p class="card-text text-muted">AMSI, ETW, evasão Sysmon</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card bg-dark border-secondary mb-3">
+                    <div class="card-body">
+                        <h5 class="card-title"><i class="fas fa-network-wired"></i> Framework C2</h5>
+                        <p class="card-text text-muted">Perfis adaptáveis, gerenciamento de beacon</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card bg-dark border-secondary mb-3">
+                    <div class="card-body">
+                        <h5 class="card-title"><i class="fas fa-bug"></i> Pós-Exploração</h5>
+                        <p class="card-text text-muted">COFF, BOF, execução inline .NET</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card bg-dark border-secondary mb-3">
+                    <div class="card-body">
+                        <h5 class="card-title"><i class="fas fa-crosshairs"></i> Motor BAS</h5>
+                        <p class="card-text text-muted">14 táticas MITRE, 40+ técnicas</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card bg-dark border-secondary mb-3">
+                    <div class="card-body">
+                        <h5 class="card-title"><i class="fas fa-shield-virus"></i> DDoS Testing</h5>
+                        <p class="card-text text-muted">5 métodos de ataque, apenas testes autorizados</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card bg-dark border-secondary mb-3">
+                    <div class="card-body">
+                        <h5 class="card-title"><i class="fas fa-file-pdf"></i> Reporting</h5>
+                        <p class="card-text text-muted">Relatórios automatizados, múltiplos formatos</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Update Status do Sistema
+    fetch(`${API_BASE}/status`)
+        .then(r => r.json())
+        .then(data => {
+            const statusEl = document.getElementById('system-status');
+            const opsEl = document.getElementById('Operações-count');
+            if (data.status === 'operational') {
+                statusEl.innerHTML = '<span class="text-success">🟢 Online</span>';
+                if (opsEl) opsEl.textContent = data.active_Operações || '0';
+            }
+        })
+        .catch(e => console.log('Status check:', e.message));
+
+    // Auto-refresh status every 10 seconds
+    setInterval(() => {
+        fetch(`${API_BASE}/status`)
+            .then(r => r.json())
+            .then(data => {
+                const opsEl = document.getElementById('Operações-count');
+                if (opsEl && data.active_Operações) opsEl.textContent = data.active_Operações;
+            })
+            .catch(() => {});
+    }, 10000);
+});
+</script>
+{% endblock %}
+

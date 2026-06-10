@@ -1,0 +1,332 @@
+{% extends "base.html" %}
+
+{% block title %}Teste DDoS - PenteIA v4.0{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-md-12">
+        <div class="alert alert-danger">
+            <h4><i class="fas fa-exclamation-triangle"></i> ⚠️ APENAS TESTES AUTORIZADOS</h4>
+            <p class="mb-0">
+                Este módulo é apenas para testar SUA PRÓPRIA infraestrutura. DDoS não autorizado é ilegal.
+                Use apenas para testes em localhost (127.x.x.x) e faixas de IP privadas (192.168.x.x, 10.x.x.x, 172.16-31.x.x)
+            </p>
+        </div>
+    </div>
+</div>
+
+<div class="row mb-4">
+    <div class="col-md-12">
+        <h2><i class="fas fa-shield-virus"></i> Módulo de Teste DDoS</h2>
+        <p class="text-muted">Teste a resiliência da sua infraestrutura contra ataques DDoS</p>
+    </div>
+</div>
+
+<!-- Configuração do Teste -->
+<div class="row mb-4">
+    <div class="col-md-6">
+        <div class="card bg-dark border-danger">
+            <div class="card-header bg-dark border-danger">
+                <h5 class="mb-0"><i class="fas fa-sliders-h text-warning"></i> Configuração do Teste</h5>
+            </div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <label class="form-label">Host Alvo</label>
+                    <input type="text" class="form-control bg-secondary text-light" id="target-host"
+                           placeholder="127.0.0.1" value="127.0.0.1">
+                    <small class="text-muted">Apenas localhost e IPs privados permitidos</small>
+                </div>
+
+                <div class="mb-3">
+                    <label class="form-label">Porta Alvo</label>
+                    <input type="number" class="form-control bg-secondary text-light" id="target-port"
+                           value="80" min="1" max="65535">
+                </div>
+
+                <div class="mb-3">
+                    <label class="form-label">Método de Ataque</label>
+                    <select class="form-select bg-secondary text-light" id="method-select">
+                        <option value="http_flood">HTTP Flood (Layer 7)</option>
+                        <option value="syn_flood">SYN Flood (Layer 4)</option>
+                        <option value="udp_flood">UDP Flood (Layer 4)</option>
+                        <option value="slowloris">Slowloris (Layer 7)</option>
+                        <option value="dns_amplification">DNS Amplification (Layer 3)</option>
+                    </select>
+                </div>
+
+                <div class="mb-3">
+                    <label class="form-label">Duração (segundos)</label>
+                    <input type="number" class="form-control bg-secondary text-light" id="duration"
+                           value="60" min="10" max="3600">
+                </div>
+
+                <div class="mb-3">
+                    <label class="form-label">Pacotes Por Segundo (PPS)</label>
+                    <input type="number" class="form-control bg-secondary text-light" id="pps"
+                           value="100" min="1" max="10000">
+                </div>
+
+                <button class="btn btn-outline-danger w-100 btn-lg" id="start-test-btn">
+                    <i class="fas fa-play"></i> Iniciar Teste
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-6">
+        <div class="card bg-dark border-info">
+            <div class="card-header bg-dark border-info">
+                <h5 class="mb-0"><i class="fas fa-info-circle text-info"></i> Info do Método</h5>
+            </div>
+            <div class="card-body">
+                <div id="method-info">
+                    <p class="text-muted">Selecione um método para ver detalhes</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Testes Ativos -->
+<div class="row mb-4">
+    <div class="col-md-12">
+        <div class="card bg-dark border-secondary">
+            <div class="card-header bg-dark border-secondary d-flex justify-content-between">
+                <h5 class="mb-0"><i class="fas fa-tasks text-warning"></i> Testes Ativos</h5>
+                <button class="btn btn-sm btn-outline-secondary" id="Atualizar-active-btn">
+                    <i class="fas fa-sync"></i> Atualizar
+                </button>
+            </div>
+            <div class="card-body">
+                <div id="active-tests-list">
+                    <p class="text-muted">No Testes Ativos</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- COMPLETO Tests -->
+<div class="row">
+    <div class="col-md-12">
+        <div class="card bg-dark border-secondary">
+            <div class="card-header bg-dark border-secondary d-flex justify-content-between">
+                <h5 class="mb-0"><i class="fas fa-history text-success"></i> Resultados dos Testes</h5>
+                <button class="btn btn-sm btn-outline-secondary" id="Atualizar-results-btn">
+                    <i class="fas fa-sync"></i> Atualizar
+                </button>
+            </div>
+            <div class="card-body">
+                <div id="results-list">
+                    <p class="text-muted">No Resultados dos Testes yet</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const METHOD_INFO = {
+    'http_flood': {
+        'name': 'HTTP Flood',
+        'layer': 'Layer 7 (Application)',
+        'description': 'Inunda alvo com requisições HTTP GET',
+        'use_case': 'Testar capacidade de web server e defesas de aplicação',
+        'requirements': 'Alvo deve ter servidor web na porta especificada'
+    },
+    'syn_flood': {
+        'name': 'SYN Flood',
+        'layer': 'Layer 4 (TCP)',
+        'description': 'Inunda alvo com conexões TCP incompletas (pacotes SYN)',
+        'use_case': 'Testar defesas de nível de rede e capacidade de fila SYN',
+        'requirements': 'Requer acesso a raw socket (admin/root)'
+    },
+    'udp_flood': {
+        'name': 'UDP Flood',
+        'layer': 'Layer 4 (UDP)',
+        'description': 'Inunda alvo com alto volume de pacotes UDP',
+        'use_case': 'Testar capacidade de banda e resiliência de serviço UDP',
+        'requirements': 'Pode gerar alta banda, testar interfaces de rede'
+    },
+    'slowloris': {
+        'name': 'Slowloris',
+        'layer': 'Layer 7 (HTTP)',
+        'description': 'Keeps HTTP connections open to exhaust server resources',
+        'use_case': 'Test connection pool limits and worker thread capacity',
+        'requirements': 'Target must have HTTP server, tests connection limits'
+    },
+    'dns_amplification': {
+        'name': 'DNS Amplification',
+        'layer': 'Layer 3 (Network)',
+        'description': 'Amplifies traffic via public DNS servers',
+        'use_case': 'Test network-level DDoS mitigation',
+        'requirements': 'Tests amplification factor and DNS infrastructure resilience'
+    }
+};
+
+document.addEventListener('DOMContentLoaded', function() {
+    document.getElementById('method-select').addEventListener('change', updateMethodInfo);
+    document.getElementById('start-test-btn').addEventListener('click', startTest);
+    document.getElementById('Atualizar-active-btn').addEventListener('click', loadActiveTests);
+    document.getElementById('Atualizar-results-btn').addEventListener('click', loadResults);
+
+    updateMethodInfo();
+    loadActiveTests();
+    loadResults();
+
+    // Auto-Atualizar
+    setInterval(loadActiveTests, 5000);
+    setInterval(loadResults, 5000);
+});
+
+function updateMethodInfo() {
+    const method = document.getElementById('method-select').value;
+    const info = METHOD_INFO[method];
+    document.getElementById('method-info').innerHTML = `
+        <p><strong>${info.name}</strong></p>
+        <p class="text-muted">${info.description}</p>
+        <hr>
+        <p><small><strong>Layer:</strong> ${info.layer}</small></p>
+        <p><small><strong>Use Case:</strong> ${info.use_case}</small></p>
+        <p><small><strong>Requirements:</strong> ${info.requirements}</small></p>
+    `;
+}
+
+function startTest() {
+    const target = document.getElementById('target-host').value;
+    const port = parseInt(document.getElementById('target-port').value);
+    const method = document.getElementById('method-select').value;
+    const duration = parseInt(document.getElementById('duration').value);
+    const pps = parseInt(document.getElementById('pps').value);
+
+    // Validate target
+    if (!isAuthorizedTarget(target)) {
+        alert('ERROR: Alvo não autorizado!\n\nApenas localhost e IPs privados permitidos:\n- 127.x.x.x\n- 192.168.x.x\n- 10.x.x.x\n- 172.16-31.x.x');
+        return;
+    }
+
+    const btn = document.getElementById('start-test-btn');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Starting...';
+
+    fetch(`${API_BASE}/ddos/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            target_host: target,
+            target_port: port,
+            method: method,
+            duration: duration,
+            pps: pps,
+            test_name: `${method} test against ${target}:${port}`
+        })
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) {
+            alert('ERROR: ' + data.message);
+        } else {
+            alert(`Test Iniciado: ${data.test_id}`);
+            loadActiveTests();
+        }
+    })
+    .catch(e => alert('Error: ' + e))
+    .finally(() => {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-play"></i> Iniciar Teste';
+    });
+}
+
+function isAuthorizedTarget(target) {
+    const authorized = ['127.', '192.168.', '10.', '172.16.', '172.17.', '172.18.', '172.19.', '172.20.', '172.21.', '172.22.', '172.23.', '172.24.', '172.25.', '172.26.', '172.27.', '172.28.', '172.29.', '172.30.', '172.31.'];
+    return authorized.some(range => target.startsWith(range));
+}
+
+function loadActiveTests() {
+    fetch(`${API_BASE}/ddos/active`)
+        .then(r => r.json())
+        .then(data => renderActiveTests(data.tests))
+        .catch(e => console.error('Error loading Testes Ativos:', e));
+}
+
+function renderActiveTests(tests) {
+    const list = document.getElementById('active-tests-list');
+    if (tests.length === 0) {
+        list.innerHTML = '<p class="text-muted">No Testes Ativos</p>';
+        return;
+    }
+
+    list.innerHTML = tests.map(t => `
+        <div class="alert alert-warning mb-2">
+            <div class="d-flex justify-content-between align-items-center">
+                <div>
+                    <strong>${t.test_id.substring(0, 16)}...</strong>
+                    <span class="badge bg-warning">${t.active ? 'EM EXECUÇÃO' : 'PARADO'}</span>
+                </div>
+                <button class="btn btn-sm btn-outline-danger" onclick="PararTest('${t.test_id}')">
+                    <i class="fas fa-Parar"></i> Parar
+                </button>
+            </div>
+            <small class="text-muted">Iniciado: ${t.started_at}</small>
+        </div>
+    `).join('');
+}
+
+function PararTest(testId) {
+    fetch(`${API_BASE}/ddos/Parar/${testId}`, { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+            alert('Test PARADO: ' + testId);
+            loadActiveTests();
+            loadResults();
+        })
+        .catch(e => alert('Error: ' + e));
+}
+
+function loadResults() {
+    fetch(`${API_BASE}/ddos/results`)
+        .then(r => r.json())
+        .then(data => renderResults(data.results))
+        .catch(e => console.error('Error loading results:', e));
+}
+
+function renderResults(results) {
+    const list = document.getElementById('results-list');
+    if (results.length === 0) {
+        list.innerHTML = '<p class="text-muted">No Resultados dos Testes yet</p>';
+        return;
+    }
+
+    list.innerHTML = results.map(r => `
+        <div class="alert alert-success mb-2">
+            <div class="d-flex justify-content-between">
+                <strong>${r.method}</strong>
+                <span class="badge bg-success">COMPLETO</span>
+            </div>
+            <small class="text-muted">Target: ${r.target}</small><br>
+            <small class="text-light">
+                Duration: ${r.duration}s |
+                Packets: ${r.packets_sent} |
+                Data: ${formatBytes(r.bytes_sent)}<br>
+                Iniciado: ${r.start_time}
+            </small>
+        </div>
+    `).join('');
+}
+
+function formatBytes(bytes) {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+}
+</script>
+{% endblock %}
+
+
+
+

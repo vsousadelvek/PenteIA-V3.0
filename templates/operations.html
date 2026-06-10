@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+
+{% block title %}Operations - PenteIA v4.0{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-md-12">
+        <h2><i class="fas fa-tasks"></i> Operations Monitor</h2>
+        <p class="text-muted">View active and completed operations</p>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-12">
+        <div class="card bg-dark border-secondary">
+            <div class="card-header bg-dark border-secondary d-flex justify-content-between">
+                <h5 class="mb-0"><i class="fas fa-list text-info"></i> All Operations</h5>
+                <button class="btn btn-sm btn-outline-secondary" id="refresh-btn">
+                    <i class="fas fa-sync"></i> Refresh
+                </button>
+            </div>
+            <div class="card-body">
+                <div id="operations-table-container">
+                    <div class="alert alert-info">Loading operations...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>document.addEventListener('DOMContentLoaded', function() {
+    loadOperations();
+    document.getElementById('refresh-btn').addEventListener('click', loadOperations);
+    setInterval(loadOperations, 5000);
+});
+
+function loadOperations() {
+    fetch(`${API_BASE}/operations`)
+        .then(r => r.json())
+        .then(data => renderOperations(data.operations))
+        .catch(e => console.error('Error loading operations:', e));
+}
+
+function renderOperations(operations) {
+    const container = document.getElementById('operations-table-container');
+
+    if (operations.length === 0) {
+        container.innerHTML = '<div class="alert alert-info">No operations yet</div>';
+        return;
+    }
+
+    const html = `
+        <table class="table table-dark table-striped">
+            <thead>
+                <tr>
+                    <th>Operation ID</th>
+                    <th>Name</th>
+                    <th>Status</th>
+                    <th>Progress</th>
+                    <th>Findings</th>
+                    <th>Started</th>
+                    <th>Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                ${operations.map(op => `
+                    <tr>
+                        <td><code class="text-info">${op.id.substring(0, 8)}</code></td>
+                        <td>${op.name}</td>
+                        <td>
+                            <span class="badge bg-${getStatusBadgeColor(op.status)}">
+                                ${op.status}
+                            </span>
+                        </td>
+                        <td>
+                            <div class="progress" style="height: 20px; width: 150px;">
+                                <div class="progress-bar bg-danger" style="width: ${op.progress}%;">
+                                    ${op.progress}%
+                                </div>
+                            </div>
+                        </td>
+                        <td><span class="badge bg-warning">${op.findings}</span></td>
+                        <td><small>${op.started_at.substring(0, 10)}</small></td>
+                        <td>
+                            <button class="btn btn-sm btn-outline-info" onclick="viewDetails('${op.id}')">
+                                <i class="fas fa-eye"></i> View
+                            </button>
+                        </td>
+                    </tr>
+                `).join('')}
+            </tbody>
+        </table>
+    `;
+
+    container.innerHTML = html;
+}
+
+function getStatusBadgeColor(status) {
+    const colors = {
+        'running': 'warning',
+        'completed': 'success',
+        'failed': 'danger',
+        'phase_1': 'info'
+    };
+    return colors[status] || 'secondary';
+}
+
+function viewDetails(opId) {
+    fetch(`${API_BASE}/operations/${opId}`)
+        .then(r => r.json())
+        .then(data => {
+            alert(`Operation: ${opId}\nStatus: ${data.status}\nProgress: ${data.progress}%\nFindings: ${data.findings}`);
+        })
+        .catch(e => alert('Error: ' + e));
+}
+</script>
+{% endblock %}
+

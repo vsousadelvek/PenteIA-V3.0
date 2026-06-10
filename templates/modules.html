@@ -1,0 +1,167 @@
+{% extends "base.html" %}
+
+{% block title %}Modules - PenteIA v4.0{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-md-12">
+        <h2><i class="fas fa-cube"></i> Module Management</h2>
+        <p class="text-muted">View and configure all v4.0 modules</p>
+    </div>
+</div>
+
+<!-- Modules Grid -->
+<div class="row" id="modules-grid">
+    <div class="col-md-12">
+        <div class="alert alert-info">
+            <i class="fas fa-spinner fa-spin"></i> Loading modules...
+        </div>
+    </div>
+</div>
+
+<!-- Module Details Modal -->
+<div class="modal fade" id="moduleModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content bg-dark border-secondary">
+            <div class="modal-header border-secondary">
+                <h5 class="modal-title" id="moduleModalTitle"></h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <pre id="moduleConfig" class="text-light"></pre>
+            </div>
+            <div class="modal-footer border-secondary">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>const MODULES_INFO = {
+    'edr_evasion': {
+        'title': 'EDR Evasion',
+        'icon': 'fa-shield',
+        'color': 'danger',
+        'description': 'ROP Gadget Discovery, Module Stomping, Sandbox Detection',
+        'techniques': ['Indirect Syscalls', 'Module Stomping', 'Sandbox Detection']
+    },
+    'memory_evasion': {
+        'title': 'Memory Evasion',
+        'icon': 'fa-microchip',
+        'color': 'warning',
+        'description': 'Sleep Obfuscation, Stack Spoofing, Memory Encryption',
+        'techniques': ['Sleep Obfuscation', 'Stack Spoofing', 'Memory Encryption']
+    },
+    'telemetry_bypass': {
+        'title': 'Telemetry Bypass',
+        'icon': 'fa-ghost',
+        'color': 'info',
+        'description': 'AMSI Bypass, ETW Disabling, Log Manipulation',
+        'techniques': ['AMSI Bypass (VEH)', 'ETW Disabling', 'Event Log Manipulation']
+    },
+    'c2_framework': {
+        'title': 'C2 Framework',
+        'icon': 'fa-network-wired',
+        'color': 'success',
+        'description': 'Beacon Management, Malleable Profiles, Redirector Cascades',
+        'techniques': ['Malleable Profiles', 'Beacon Sessions', 'Protocol Support']
+    },
+    'post_exploitation': {
+        'title': 'Post-Exploitation',
+        'icon': 'fa-lock-open',
+        'color': 'primary',
+        'description': 'COFF Execution, Mimikatz, BloodHound, Rubeus',
+        'techniques': ['COFF/BOF', 'Mimikatz', 'BloodHound', 'Rubeus']
+    },
+    'bas_engine': {
+        'title': 'BAS Engine',
+        'icon': 'fa-crosshairs',
+        'color': 'warning',
+        'description': 'MITRE Playbooks, Technique Execution, Severity Scoring',
+        'techniques': ['MITRE Playbooks', 'Technique Execution', 'Severity Scoring']
+    },
+    'reporting': {
+        'title': 'Automated Reporting',
+        'icon': 'fa-file-pdf',
+        'color': 'danger',
+        'description': 'Jinja2 Reports, Multi-format Export, Recommendations',
+        'techniques': ['HTML Reports', 'PDF Export', 'DOCX Export']
+    }
+};
+
+document.addEventListener('DOMContentLoaded', function() {
+    loadModules();
+});
+
+function loadModules() {
+    fetch(`${API_BASE}/modules/status`)
+        .then(r => r.json())
+        .then(data => {
+            renderModules(data.modules);
+        })
+        .catch(e => {
+            console.error('Error loading modules:', e);
+            document.getElementById('modules-grid').innerHTML =
+                '<div class="col-md-12"><div class="alert alert-danger">Error loading modules</div></div>';
+        });
+}
+
+function renderModules(modules) {
+    const grid = document.getElementById('modules-grid');
+    const moduleCards = Object.entries(modules).map(([key, module]) => {
+        const info = MODULES_INFO[key] || {};
+        return `
+            <div class="col-md-4 mb-4">
+                <div class="card bg-dark border-${info.color || 'secondary'} h-100">
+                    <div class="card-header bg-dark border-${info.color || 'secondary'}">
+                        <h5 class="mb-0">
+                            <i class="fas ${info.icon} text-${info.color}"></i>
+                            ${info.title || key}
+                        </h5>
+                    </div>
+                    <div class="card-body">
+                        <p class="card-text text-muted">${info.description || 'N/A'}</p>
+                        <p class="card-text">
+                            <small class="text-light">
+                                <strong>Techniques:</strong><br>
+                                ${info.techniques ? info.techniques.map(t => `<i class="fas fa-check text-success"></i> ${t}`).join('<br>') : 'N/A'}
+                            </small>
+                        </p>
+                    </div>
+                    <div class="card-footer bg-dark border-${info.color || 'secondary'}">
+                        <button class="btn btn-sm btn-outline-${info.color}" onclick="showModuleConfig('${key}')">
+                            <i class="fas fa-cog"></i> Configuration
+                        </button>
+                        <span class="badge bg-${info.color} float-end">
+                            <i class="fas fa-check-circle"></i> Ready
+                        </span>
+                    </div>
+                </div>
+            </div>
+        `;
+    }).join('');
+
+    grid.innerHTML = moduleCards;
+}
+
+function showModuleConfig(moduleName) {
+    fetch(`${API_BASE}/modules/config/${moduleName}`)
+        .then(r => r.json())
+        .then(data => {
+            document.getElementById('moduleModalTitle').textContent =
+                MODULES_INFO[moduleName]?.title || moduleName;
+            document.getElementById('moduleConfig').textContent =
+                JSON.stringify(data.config, null, 2);
+
+            new bootstrap.Modal(document.getElementById('moduleModal')).show();
+        })
+        .catch(e => {
+            alert('Error loading configuration: ' + e);
+        });
+}
+</script>
+{% endblock %}
+

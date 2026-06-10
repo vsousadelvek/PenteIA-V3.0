@@ -1,0 +1,223 @@
+{% extends "base.html" %}
+
+{% block title %}C2 Beacon - PenteIA v4.0{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-md-12">
+        <h2><i class="fas fa-network-wired"></i> C2 Beacon Management</h2>
+        <p class="text-muted">Create and manage beacon sessions</p>
+    </div>
+</div>
+
+<!-- Create Beacon -->
+<div class="row mb-4">
+    <div class="col-md-6">
+        <div class="card bg-dark border-secondary">
+            <div class="card-header bg-dark border-secondary">
+                <h5 class="mb-0"><i class="fas fa-plus text-success"></i> Create New Beacon</h5>
+            </div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <label class="form-label">Profile</label>
+                    <select class="form-select bg-secondary text-light" id="profile-select">
+                        <option value="azure">Azure Telemetry</option>
+                        <option value="aws">AWS SDK</option>
+                        <option value="o365">Office 365</option>
+                        <option value="doh">DNS over HTTPS</option>
+                    </select>
+                </div>
+                <button class="btn btn-outline-success w-100" id="create-beacon-btn">
+                    <i class="fas fa-plus"></i> Create Beacon
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-6">
+        <div class="card bg-dark border-secondary">
+            <div class="card-header bg-dark border-secondary">
+                <h5 class="mb-0"><i class="fas fa-info-circle text-info"></i> Profile Info</h5>
+            </div>
+            <div class="card-body">
+                <div id="profile-info">
+                    <p class="text-muted">Select a profile to see details</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Active Beacons -->
+<div class="row">
+    <div class="col-md-12">
+        <div class="card bg-dark border-secondary">
+            <div class="card-header bg-dark border-secondary d-flex justify-content-between">
+                <h5 class="mb-0"><i class="fas fa-list text-info"></i> Active Beacons</h5>
+                <button class="btn btn-sm btn-outline-secondary" id="refresh-beacons-btn">
+                    <i class="fas fa-sync"></i> Refresh
+                </button>
+            </div>
+            <div class="card-body">
+                <div id="beacons-list">
+                    <div class="alert alert-info">No active beacons. Create one above.</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Execute Command Modal -->
+<div class="modal fade" id="commandModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content bg-dark border-secondary">
+            <div class="modal-header border-secondary">
+                <h5 class="modal-title">Execute Command on <span id="beacon-id-display"></span></h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="current-beacon-id">
+                <div class="mb-3">
+                    <label class="form-label">Command</label>
+                    <input type="text" class="form-control bg-secondary text-light" id="command-input" placeholder="whoami">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Arguments (optional)</label>
+                    <input type="text" class="form-control bg-secondary text-light" id="args-input" placeholder="/all">
+                </div>
+            </div>
+            <div class="modal-footer border-secondary">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-danger" id="execute-cmd-btn">Execute</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>const PROFILE_INFO = {
+    'azure': {
+        'name': 'Azure Telemetry',
+        'description': 'Appears as legitimate Azure diagnostic data',
+        'uri': '/api/v1/telemetry?client=win10'
+    },
+    'aws': {
+        'name': 'AWS SDK',
+        'description': 'Mimics AWS SDK communication patterns',
+        'uri': '/api/metadata/instances?mode=latest'
+    },
+    'o365': {
+        'name': 'Office 365',
+        'description': 'Blends with O365 traffic patterns',
+        'uri': '/autodiscover/autodiscover.svc/root/oauth/token'
+    },
+    'doh': {
+        'name': 'DNS over HTTPS',
+        'description': 'Exfiltrates via DNS-over-HTTPS (DoH)',
+        'uri': 'https://1.1.1.1/dns-query'
+    }
+};
+
+document.addEventListener('DOMContentLoaded', function() {
+    document.getElementById('profile-select').addEventListener('change', updateProfileInfo);
+    document.getElementById('create-beacon-btn').addEventListener('click', createBeacon);
+    document.getElementById('refresh-beacons-btn').addEventListener('click', loadBeacons);
+    document.getElementById('execute-cmd-btn').addEventListener('click', executeCommand);
+
+    updateProfileInfo();
+    loadBeacons();
+});
+
+function updateProfileInfo() {
+    const profile = document.getElementById('profile-select').value;
+    const info = PROFILE_INFO[profile];
+    document.getElementById('profile-info').innerHTML = `
+        <p><strong>${info.name}</strong></p>
+        <p class="text-muted">${info.description}</p>
+        <p><small class="text-info">URI: <code>${info.uri}</code></small></p>
+    `;
+}
+
+function createBeacon() {
+    const profile = document.getElementById('profile-select').value;
+    fetch(`${API_BASE}/c2/beacon/create`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profile })
+    })
+    .then(r => r.json())
+    .then(data => {
+        alert(`Beacon created: ${data.beacon_id}`);
+        loadBeacons();
+    })
+    .catch(e => alert('Error: ' + e));
+}
+
+function loadBeacons() {
+    fetch(`${API_BASE}/c2/beacons`)
+        .then(r => r.json())
+        .then(data => renderBeacons(data.beacons))
+        .catch(e => console.error('Error loading beacons:', e));
+}
+
+function renderBeacons(beacons) {
+    const list = document.getElementById('beacons-list');
+    if (beacons.length === 0) {
+        list.innerHTML = '<div class="alert alert-info">No active beacons.</div>';
+        return;
+    }
+
+    list.innerHTML = beacons.map(b => `
+        <div class="alert alert-secondary mb-2">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <strong>${b.beacon_id}</strong>
+                <span class="badge bg-success"><i class="fas fa-circle"></i> Alive</span>
+            </div>
+            <small class="text-muted">Created: ${b.created_at}</small><br>
+            <small class="text-light">Commands executed: ${b.commands_executed}</small><br>
+            <small class="text-light">Data exfiltrated: ${b.data_exfiltrated_mb.toFixed(2)} MB</small><br>
+            <div class="mt-2">
+                <button class="btn btn-sm btn-outline-info" onclick="showCommandModal('${b.beacon_id}')">
+                    <i class="fas fa-terminal"></i> Execute Command
+                </button>
+                <button class="btn btn-sm btn-outline-warning" onclick="exfiltrateData('${b.beacon_id}')">
+                    <i class="fas fa-download"></i> Exfiltrate
+                </button>
+            </div>
+        </div>
+    `).join('');
+}
+
+function showCommandModal(beaconId) {
+    document.getElementById('current-beacon-id').value = beaconId;
+    document.getElementById('beacon-id-display').textContent = beaconId.substring(0, 8) + '...';
+    new bootstrap.Modal(document.getElementById('commandModal')).show();
+}
+
+function executeCommand() {
+    const beaconId = document.getElementById('current-beacon-id').value;
+    const command = document.getElementById('command-input').value;
+    const args = document.getElementById('args-input').value.split(/\s+/).filter(a => a);
+
+    fetch(`${API_BASE}/c2/beacon/${beaconId}/command`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command, args })
+    })
+    .then(r => r.json())
+    .then(data => {
+        alert('Command executed successfully');
+        bootstrap.Modal.getInstance(document.getElementById('commandModal')).hide();
+        loadBeacons();
+    })
+    .catch(e => alert('Error: ' + e));
+}
+
+function exfiltrateData(beaconId) {
+    alert('Exfiltrate feature: Send data from ' + beaconId);
+}
+</script>
+{% endblock %}
+

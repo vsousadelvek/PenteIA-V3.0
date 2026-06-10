@@ -1,0 +1,161 @@
+{% extends "base.html" %}
+
+{% block title %}BAS - PenteIA v4.0{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-md-12">
+        <h2><i class="fas fa-crosshairs"></i> BAS/CSV Automation</h2>
+        <p class="text-muted">Execute MITRE ATT&CK playbooks and assessments</p>
+    </div>
+</div>
+
+<!-- Playbooks -->
+<div class="row mb-4" id="playbooks-grid">
+    <div class="col-md-12">
+        <div class="alert alert-info">
+            <i class="fas fa-spinner fa-spin"></i> Loading playbooks...
+        </div>
+    </div>
+</div>
+
+<!-- Full Assessment -->
+<div class="row mb-4">
+    <div class="col-md-12">
+        <div class="card bg-dark border-danger">
+            <div class="card-header bg-dark border-danger">
+                <h5 class="mb-0"><i class="fas fa-rocket text-warning"></i> Full Assessment</h5>
+            </div>
+            <div class="card-body">
+                <p class="text-muted mb-3">Run all MITRE playbooks and generate comprehensive assessment report</p>
+                <button class="btn btn-outline-danger btn-lg w-100" id="full-assessment-btn">
+                    <i class="fas fa-play"></i> Run Full Assessment
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Results -->
+<div class="row">
+    <div class="col-md-12">
+        <div class="card bg-dark border-secondary">
+            <div class="card-header bg-dark border-secondary">
+                <h5 class="mb-0"><i class="fas fa-chart-line text-success"></i> Results</h5>
+            </div>
+            <div class="card-body">
+                <div id="results-area">
+                    <p class="text-muted">Run a playbook to see results</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>document.addEventListener('DOMContentLoaded', function() {
+    loadPlaybooks();
+    document.getElementById('full-assessment-btn').addEventListener('click', runFullAssessment);
+});
+
+function loadPlaybooks() {
+    fetch(`${API_BASE}/bas/playbooks`)
+        .then(r => r.json())
+        .then(data => renderPlaybooks(data.playbooks))
+        .catch(e => console.error('Error loading playbooks:', e));
+}
+
+function renderPlaybooks(playbooks) {
+    const grid = document.getElementById('playbooks-grid');
+    const cards = playbooks.map(pb => `
+        <div class="col-md-6 mb-4">
+            <div class="card bg-dark border-secondary h-100">
+                <div class="card-header bg-dark border-secondary">
+                    <h5 class="mb-0 text-capitalize">
+                        <i class="fas fa-star text-warning"></i> ${pb.replace(/_/g, ' ')}
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <p class="text-muted">MITRE ATT&CK playbook for ${pb.replace(/_/g, ' ')}</p>
+                </div>
+                <div class="card-footer bg-dark border-secondary">
+                    <button class="btn btn-outline-info w-100" onclick="runPlaybook('${pb}')">
+                        <i class="fas fa-play"></i> Execute
+                    </button>
+                </div>
+            </div>
+        </div>
+    `).join('');
+
+    grid.innerHTML = cards;
+}
+
+function runPlaybook(playbookName) {
+    const resultsArea = document.getElementById('results-area');
+    resultsArea.innerHTML = '<div class="alert alert-info"><i class="fas fa-spinner fa-spin"></i> Executing playbook...</div>';
+
+    fetch(`${API_BASE}/bas/run-playbook`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ playbook: playbookName })
+    })
+    .then(r => r.json())
+    .then(data => {
+        setTimeout(() => checkOperationStatus(data.operation_id, resultsArea), 2000);
+    })
+    .catch(e => {
+        resultsArea.innerHTML = `<div class="alert alert-danger">Error: ${e}</div>`;
+    });
+}
+
+function runFullAssessment() {
+    const resultsArea = document.getElementById('results-area');
+    resultsArea.innerHTML = '<div class="alert alert-info"><i class="fas fa-spinner fa-spin"></i> Running full assessment...</div>';
+
+    fetch(`${API_BASE}/bas/full-assessment`, { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+            setTimeout(() => checkOperationStatus(data.operation_id, resultsArea), 2000);
+        })
+        .catch(e => {
+            resultsArea.innerHTML = `<div class="alert alert-danger">Error: ${e}</div>`;
+        });
+}
+
+function checkOperationStatus(opId, resultsArea) {
+    fetch(`${API_BASE}/operations/${opId}`)
+        .then(r => r.json())
+        .then(data => {
+            if (data.status === 'running') {
+                resultsArea.innerHTML = `
+                    <div class="alert alert-info">
+                        <i class="fas fa-spinner fa-spin"></i> Running... (${data.progress}%)
+                        <div class="progress mt-2" style="height: 20px;">
+                            <div class="progress-bar bg-info" style="width: ${data.progress}%;"></div>
+                        </div>
+                    </div>
+                `;
+                setTimeout(() => checkOperationStatus(opId, resultsArea), 2000);
+            } else if (data.status === 'completed') {
+                const result = data.result || {};
+                resultsArea.innerHTML = `
+                    <div class="alert alert-success">
+                        <strong>Assessment Completed!</strong><br>
+                        Total Findings: ${result.total_findings || 0}
+                    </div>
+                    <div class="mt-3">
+                        <h6>Findings by Severity:</h6>
+                        <pre class="text-light">${JSON.stringify(result, null, 2)}</pre>
+                    </div>
+                `;
+            } else {
+                resultsArea.innerHTML = `<div class="alert alert-danger">Assessment failed</div>`;
+            }
+        })
+        .catch(e => console.error('Status check error:', e));
+}
+</script>
+{% endblock %}
+

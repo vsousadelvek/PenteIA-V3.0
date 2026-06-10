@@ -1,4 +1,6 @@
-# Núcleo do PenteIA (obrigatório)
+# ============================================================================
+# PenteIA v3.0 - Núcleo (obrigatório)
+# ============================================================================
 requests>=2.28.0
 pandas>=1.4.0
 numpy>=1.23.0
@@ -10,10 +12,47 @@ colorama>=0.4.5
 PyYAML>=6.0
 psutil>=5.9.0
 
+# ============================================================================
+# PenteIA v4.0 - Escalação (novo)
+# ============================================================================
+
+# Encriptação e segurança criptográfica
+cryptography>=41.0.0
+
+# Template generation (Jinja2)
+Jinja2>=3.1.0
+
+# Geração de relatórios
+python-docx>=0.8.11           # DOCX generation
+reportlab>=4.0.0               # PDF generation (alternativa)
+fpdf2>=2.7.0                   # Geração PDF leve
+
+# Processamento de dados estruturados
+openpyxl>=3.1.0                # Excel export
+
+# Logging e monitoring
+loguru>=0.7.0                  # Advanced logging
+
+# Networking
+dnspython>=2.4.0               # DNS operations (DoH)
+
 # Opcional (apenas para visualizações/gráficos)
 matplotlib>=3.6.0
 seaborn>=0.12.0
+networkx>=3.1                  # Graph visualization (attack paths)
 
 # Opcional (apenas para o motor neural --engine lstm: BiLSTM + Attention)
 # Instale com: pip install torch
 torch>=2.0.0
+
+# ============================================================================
+# Ferramentas recomendadas para produção
+# ============================================================================
+# Para análise de PE headers (COFF):
+# pefile>=2023.2.0
+
+# Para análise dinâmica avançada:
+# volatility3>=2.4.0              # Memory forensics
+
+# Para C2 avançado:
+# asyncio, aiohttp                # Async HTTP (já em stdlib)

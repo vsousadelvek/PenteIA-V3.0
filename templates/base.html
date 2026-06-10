@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}PenteIA v4.0 Dashboard{% endblock %}</title>
+
+    <!-- Bootstrap 5 CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+
+    <!-- Font Awesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <!-- Charts.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="/static/css/style.css">
+
+    {% block extra_css %}{% endblock %}
+</head>
+<body>
+    <!-- Navigation -->
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark border-bottom border-danger">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="/">
+                <i class="fas fa-terminal text-danger"></i> <strong>PenteIA v4.0</strong>
+            </a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav ms-auto">
+                    <li class="nav-item">
+                        <a class="nav-link" href="/">
+                            <i class="fas fa-tachometer-alt"></i> Painel
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="/modules">
+                            <i class="fas fa-cube"></i> Módulos
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="/c2">
+                            <i class="fas fa-network-wired"></i> C2 Beacon
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="/bas">
+                            <i class="fas fa-crosshairs"></i> BAS
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="/operations">
+                            <i class="fas fa-tasks"></i> Operações
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="/reporting">
+                            <i class="fas fa-file-pdf"></i> Relatórios
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="/evasion">
+                            <i class="fas fa-shield"></i> Evasão
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="/ddos">
+                            <i class="fas fa-shield-virus"></i> Teste DDoS
+                        </a>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <div class="container-fluid mt-4">
+        {% block content %}{% endblock %}
+    </div>
+
+    <!-- Footer -->
+    <footer class="bg-dark text-light mt-5 py-4 border-top border-secondary">
+        <div class="container-fluid">
+            <div class="row">
+                <div class="col-md-6">
+                    <p class="mb-0"><i class="fas fa-shield"></i> <strong>PenteIA v4.0</strong> - Plataforma Red Team</p>
+                    <small class="text-muted">Apenas para testes de penetração autorizados</small>
+                </div>
+                <div class="col-md-6 text-end">
+                    <small class="text-muted" id="footer-time">
+                        <span id="current-time"></span>
+                    </small>
+                </div>
+            </div>
+        </div>
+    </footer>
+
+    <!-- Bootstrap 5 JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
+    <!-- jQuery (optional, for AJAX) -->
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+
+    <!-- Custom JS -->
+    <script src="/static/js/main.js"></script>
+
+    {% block extra_js %}{% endblock %}
+
+    <script>
+        // Update time in footer
+        function updateTime() {
+            const now = new Date();
+            document.getElementById('current-time').textContent = now.toLocaleString();
+        }
+        setInterval(updateTime, 1000);
+        updateTime();
+    </script>
+</body>
+</html>
+
