@@ -62,7 +62,7 @@ function renderOperations(operations) {
                     <th>Progress</th>
                     <th>Findings</th>
                     <th>Started</th>
-                    <th>Action</th>
+                    <th>Ação</th>
                 </tr>
             </thead>
             <tbody>
@@ -85,7 +85,7 @@ function renderOperations(operations) {
                         <td><span class="badge bg-warning">${op.findings}</span></td>
                         <td><small>${op.started_at.substring(0, 10)}</small></td>
                         <td>
-                            <button class="btn btn-sm btn-outline-info" onclick="viewDetails('${op.id}')">
+                            <button class="btn btn-sm btn-outline-info" onclick="viewDetalhes('${op.id}')">
                                 <i class="fas fa-eye"></i> View
                             </button>
                         </td>
@@ -108,7 +108,7 @@ function getStatusBadgeColor(status) {
     return colors[status] || 'secondary';
 }
 
-function viewDetails(opId) {
+function viewDetalhes(opId) {
     fetch(`${API_BASE}/operations/${opId}`)
         .then(r => r.json())
         .then(data => {
@@ -118,4 +118,5 @@ function viewDetails(opId) {
 }
 </script>
 {% endblock %}
+
 

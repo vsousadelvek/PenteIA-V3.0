@@ -169,33 +169,33 @@ body {
 
 /* Alerts */
 .alert-info {
-    background-color: rgba(23, 162, 184, 0.1);
+    background-color: #1a3a52;
     border-color: var(--accent-blue);
-    color: #17a2b8;
+    color: #5dd9ff;
 }
 
 .alert-success {
-    background-color: rgba(40, 167, 69, 0.1);
+    background-color: #1a3a2a;
     border-color: var(--accent-green);
-    color: #28a745;
+    color: #5fff70;
 }
 
 .alert-warning {
-    background-color: rgba(255, 193, 7, 0.1);
+    background-color: #3a3a1a;
     border-color: var(--accent-yellow);
-    color: #ffc107;
+    color: #ffff70;
 }
 
 .alert-danger {
-    background-color: rgba(220, 53, 69, 0.1);
+    background-color: #3a1a1a;
     border-color: var(--accent-red);
-    color: #dc3545;
+    color: #ff7070;
 }
 
 .alert-secondary {
-    background-color: rgba(108, 117, 125, 0.1);
+    background-color: #2d2d2d;
     border-color: #6c757d;
-    color: #adb5bd;
+    color: #e9ecef;
 }
 
 /* Badges */

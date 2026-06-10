@@ -1,0 +1,264 @@
+{% extends "base.html" %}
+
+{% block title %}Reconhecimento - PenteIA v4.0{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-md-12">
+        <h1><i class="fas fa-search text-danger"></i> Reconhecimento</h1>
+        <p class="text-muted">Resolução de domínio e varredura de portas</p>
+    </div>
+</div>
+
+<!-- Alert Legal -->
+<div class="alert alert-danger" role="alert">
+    <i class="fas fa-exclamation-triangle"></i> <strong>APENAS PARA TESTES AUTORIZADOS</strong>
+    <br>Use apenas em hosts que você tem permissão explícita para testar.
+    <br>Varredura sem autorização é <strong>ILEGAL</strong> em muitas jurisdições.
+</div>
+
+<!-- Resolução de Domínio -->
+<div class="row mb-4">
+    <div class="col-md-6">
+        <div class="card bg-dark border-info">
+            <div class="card-header bg-dark border-info">
+                <h5 class="mb-0"><i class="fas fa-globe text-info"></i> Resolução de Domínio</h5>
+            </div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <label class="form-label">Alvo (Domínio, URL ou IP)</label>
+                    <input type="text" id="resolve-target" class="form-control"
+                           placeholder="exemplo.com.br ou 192.168.1.1" value="localhost">
+                </div>
+                <button onclick="resolveDomain()" class="btn btn-info w-100">
+                    <i class="fas fa-search"></i> Resolver
+                </button>
+            </div>
+        </div>
+
+        <div class="card bg-dark border-info mt-3">
+            <div class="card-header bg-dark border-info">
+                <h5 class="mb-0"><i class="fas fa-info-circle text-info"></i> Resultado</h5>
+            </div>
+            <div class="card-body">
+                <div id="resolve-result" class="text-muted">
+                    <i>Resultado aparecerá aqui...</i>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Varredura de Portas -->
+    <div class="col-md-6">
+        <div class="card bg-dark border-warning">
+            <div class="card-header bg-dark border-warning">
+                <h5 class="mb-0"><i class="fas fa-network-wired text-warning"></i> Varredura de Portas</h5>
+            </div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <label class="form-label">Alvo (IP ou Domínio)</label>
+                    <input type="text" id="scan-target" class="form-control"
+                           placeholder="127.0.0.1 ou localhost" value="localhost">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Portas</label>
+                    <select id="scan-ports" class="form-select">
+                        <option value="top">Top Portas (23 mais comuns)</option>
+                        <option value="1-1024">1-1024</option>
+                        <option value="1-65535">Todas (1-65535)</option>
+                        <option value="80,443">Web (80, 443)</option>
+                        <option value="22,3306,5432">Databases/SSH</option>
+                    </select>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Timeout (segundos)</label>
+                    <input type="number" id="scan-timeout" class="form-control" value="1.0" min="0.1" max="10" step="0.1">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Workers (threads)</label>
+                    <input type="number" id="scan-workers" class="form-control" value="50" min="1" max="500">
+                </div>
+                <button onclick="scanPorts()" class="btn btn-warning w-100">
+                    <i class="fas fa-spinner"></i> Escanear
+                </button>
+            </div>
+        </div>
+
+        <div class="card bg-dark border-warning mt-3">
+            <div class="card-header bg-dark border-warning">
+                <h5 class="mb-0"><i class="fas fa-list text-warning"></i> Resultado da Varredura</h5>
+            </div>
+            <div class="card-body">
+                <div id="scan-result" class="text-muted">
+                    <i>Resultado aparecerá aqui...</i>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Histórico -->
+<div class="row">
+    <div class="col-md-12">
+        <div class="card bg-dark border-secondary">
+            <div class="card-header bg-dark border-secondary">
+                <h5 class="mb-0"><i class="fas fa-history text-secondary"></i> Histórico de Reconhecimento</h5>
+            </div>
+            <div class="card-body">
+                <div id="recon-history" class="text-muted">
+                    <i>Nenhuma operação ainda...</i>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let reconHistory = [];
+
+function resolveDomain() {
+    const target = document.getElementById('resolve-target').value.trim();
+    if (!target) {
+        alert('Digite um alvo!');
+        return;
+    }
+
+    const resultDiv = document.getElementById('resolve-result');
+    resultDiv.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Resolvendo...';
+
+    fetch(`${API_BASE}/recon/resolve?target=${encodeURIComponent(target)}`, {
+        method: 'POST'
+    })
+    .then(r => r.json())
+    .then(data => {
+        console.log('Resolve result:', data);
+
+        let html = '';
+        if (data.erro) {
+            html = `<div class="alert alert-danger">${data.erro}</div>`;
+        } else if (data.is_ip) {
+            html = `
+                <p><strong>Tipo:</strong> Já é um IP</p>
+                <p><strong>IP:</strong> <span class="text-info">${data.ips[0]}</span></p>
+            `;
+        } else if (data.ips && data.ips.length > 0) {
+            html = `
+                <p><strong>Host:</strong> ${data.host}</p>
+                <p><strong>IP(s) Encontrado(s):</strong></p>
+                <ul>
+            `;
+            data.ips.forEach(ip => {
+                html += `<li><span class="text-success">${ip}</span></li>`;
+            });
+            html += '</ul>';
+            if (data.canonico) {
+                html += `<p><strong>FQDN:</strong> ${data.canonico}</p>`;
+            }
+        } else {
+            html = '<div class="alert alert-warning">Nenhum IP encontrado</div>';
+        }
+
+        resultDiv.innerHTML = html;
+
+        reconHistory.push({
+            tipo: 'Resolução',
+            alvo: target,
+            resultado: data.ips ? `${data.ips.length} IP(s)` : 'Erro',
+            tempo: new Date().toLocaleString()
+        });
+        updateHistory();
+    })
+    .catch(e => {
+        resultDiv.innerHTML = `<div class="alert alert-danger">Erro: ${e.message}</div>`;
+    });
+}
+
+function scanPorts() {
+    const target = document.getElementById('scan-target').value.trim();
+    const ports = document.getElementById('scan-ports').value;
+    const timeout = parseFloat(document.getElementById('scan-timeout').value);
+    const workers = parseInt(document.getElementById('scan-workers').value);
+
+    if (!target) {
+        alert('Digite um alvo!');
+        return;
+    }
+
+    const resultDiv = document.getElementById('scan-result');
+    resultDiv.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Varrendo portas...';
+
+    const params = new URLSearchParams({
+        target: target,
+        ports: ports,
+        timeout: timeout,
+        workers: workers
+    });
+
+    fetch(`${API_BASE}/recon/scan?${params}`, {
+        method: 'POST'
+    })
+    .then(r => r.json())
+    .then(data => {
+        console.log('Scan result:', data);
+
+        let html = `
+            <p><strong>Alvo:</strong> ${data.target}</p>
+            <p><strong>Host:</strong> ${data.host}</p>
+            <p><strong>Portas Varridas:</strong> ${data.ports_scanned}</p>
+        `;
+
+        if (data.open_ports && data.open_ports.length > 0) {
+            html += `
+                <p><strong>Portas Abertas (${data.open_ports.length}):</strong></p>
+                <ul>
+            `;
+            data.open_ports.forEach(port => {
+                const services = {
+                    20: 'ftp-data', 21: 'ftp', 22: 'ssh', 80: 'http', 443: 'https',
+                    3306: 'mysql', 5432: 'postgresql', 8080: 'http-proxy'
+                };
+                const service = services[port] || 'desconhecido';
+                html += `<li><span class="text-success">${port}</span> (${service})</li>`;
+            });
+            html += '</ul>';
+        } else {
+            html += '<div class="alert alert-info">Nenhuma porta aberta encontrada</div>';
+        }
+
+        resultDiv.innerHTML = html;
+
+        reconHistory.push({
+            tipo: 'Varredura',
+            alvo: target,
+            resultado: `${data.open_ports.length} porta(s) aberta(s)`,
+            tempo: new Date().toLocaleString()
+        });
+        updateHistory();
+    })
+    .catch(e => {
+        resultDiv.innerHTML = `<div class="alert alert-danger">Erro: ${e.message}</div>`;
+    });
+}
+
+function updateHistory() {
+    const historyDiv = document.getElementById('recon-history');
+    if (reconHistory.length === 0) {
+        historyDiv.innerHTML = '<i>Nenhuma operação ainda...</i>';
+        return;
+    }
+
+    let html = '<table class="table table-dark table-sm"><thead><tr>' +
+               '<th>Tipo</th><th>Alvo</th><th>Resultado</th><th>Hora</th></tr></thead><tbody>';
+
+    reconHistory.slice().reverse().forEach(item => {
+        html += `<tr><td>${item.tipo}</td><td>${item.alvo}</td><td>${item.resultado}</td><td>${item.tempo}</td></tr>`;
+    });
+
+    html += '</tbody></table>';
+    historyDiv.innerHTML = html;
+}
+</script>
+{% endblock %}

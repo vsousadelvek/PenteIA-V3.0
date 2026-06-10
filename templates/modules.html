@@ -1,12 +1,12 @@
 {% extends "base.html" %}
 
-{% block title %}Modules - PenteIA v4.0{% endblock %}
+{% block title %}Módulos - PenteIA v4.0{% endblock %}
 
 {% block content %}
 <div class="row mb-4">
     <div class="col-md-12">
-        <h2><i class="fas fa-cube"></i> Module Management</h2>
-        <p class="text-muted">View and configure all v4.0 modules</p>
+        <h2><i class="fas fa-cube"></i> Gerenciamento de Módulos</h2>
+        <p class="text-muted">Veja e configure todos os módulos v4.0</p>
     </div>
 </div>
 
@@ -14,7 +14,7 @@
 <div class="row" id="modules-grid">
     <div class="col-md-12">
         <div class="alert alert-info">
-            <i class="fas fa-spinner fa-spin"></i> Loading modules...
+            <i class="fas fa-spinner fa-spin"></i> Carregando módulos...
         </div>
     </div>
 </div>
@@ -31,7 +31,7 @@
                 <pre id="moduleConfig" class="text-light"></pre>
             </div>
             <div class="modal-footer border-secondary">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Fechar</button>
             </div>
         </div>
     </div>
@@ -42,48 +42,48 @@
 {% block extra_js %}
 <script>const MODULES_INFO = {
     'edr_evasion': {
-        'title': 'EDR Evasion',
+        'title': 'Evasão EDR',
         'icon': 'fa-shield',
         'color': 'danger',
-        'description': 'ROP Gadget Discovery, Module Stomping, Sandbox Detection',
-        'techniques': ['Indirect Syscalls', 'Module Stomping', 'Sandbox Detection']
+        'description': 'Descoberta de Gadgets ROP, Module Stomping, Detecção Sandbox',
+        'techniques': ['Syscalls Indiretas', 'Module Stomping', 'Sandbox Detection']
     },
     'memory_evasion': {
-        'title': 'Memory Evasion',
+        'title': 'Evasão de Memória',
         'icon': 'fa-microchip',
         'color': 'warning',
-        'description': 'Sleep Obfuscation, Stack Spoofing, Memory Encryption',
+        'description': 'Ofuscação Sleep, Stack Spoofing, Criptografia de Memória',
         'techniques': ['Sleep Obfuscation', 'Stack Spoofing', 'Memory Encryption']
     },
     'telemetry_bypass': {
-        'title': 'Telemetry Bypass',
+        'title': 'Bypass de Telemetria',
         'icon': 'fa-ghost',
         'color': 'info',
         'description': 'AMSI Bypass, ETW Disabling, Log Manipulation',
         'techniques': ['AMSI Bypass (VEH)', 'ETW Disabling', 'Event Log Manipulation']
     },
     'c2_framework': {
-        'title': 'C2 Framework',
+        'title': 'Framework C2',
         'icon': 'fa-network-wired',
         'color': 'success',
         'description': 'Beacon Management, Malleable Profiles, Redirector Cascades',
         'techniques': ['Malleable Profiles', 'Beacon Sessions', 'Protocol Support']
     },
     'post_exploitation': {
-        'title': 'Post-Exploitation',
+        'title': 'Pós-Exploração',
         'icon': 'fa-lock-open',
         'color': 'primary',
         'description': 'COFF Execution, Mimikatz, BloodHound, Rubeus',
         'techniques': ['COFF/BOF', 'Mimikatz', 'BloodHound', 'Rubeus']
     },
     'bas_engine': {
-        'title': 'BAS Engine',
+        'title': 'Motor BAS',
         'icon': 'fa-crosshairs',
         'color': 'warning',
         'description': 'MITRE Playbooks, Technique Execution, Severity Scoring',
         'techniques': ['MITRE Playbooks', 'Technique Execution', 'Severity Scoring']
     },
-    'reporting': {
+    'Relatórios': {
         'title': 'Automated Reporting',
         'icon': 'fa-file-pdf',
         'color': 'danger',
@@ -103,9 +103,9 @@ function loadModules() {
             renderModules(data.modules);
         })
         .catch(e => {
-            console.error('Error loading modules:', e);
+            console.error('Erro ao carregar módulos:', e);
             document.getElementById('modules-grid').innerHTML =
-                '<div class="col-md-12"><div class="alert alert-danger">Error loading modules</div></div>';
+                '<div class="col-md-12"><div class="alert alert-danger">Erro ao carregar módulos</div></div>';
         });
 }
 
@@ -133,10 +133,10 @@ function renderModules(modules) {
                     </div>
                     <div class="card-footer bg-dark border-${info.color || 'secondary'}">
                         <button class="btn btn-sm btn-outline-${info.color}" onclick="showModuleConfig('${key}')">
-                            <i class="fas fa-cog"></i> Configuration
+                            <i class="fas fa-cog"></i> Configuração
                         </button>
                         <span class="badge bg-${info.color} float-end">
-                            <i class="fas fa-check-circle"></i> Ready
+                            <i class="fas fa-check-circle"></i> Pronto
                         </span>
                     </div>
                 </div>
@@ -159,9 +159,11 @@ function showModuleConfig(moduleName) {
             new bootstrap.Modal(document.getElementById('moduleModal')).show();
         })
         .catch(e => {
-            alert('Error loading configuration: ' + e);
+            alert('Erro ao carregar configuração: ' + e);
         });
 }
 </script>
 {% endblock %}
+
+
 

@@ -25,6 +25,7 @@ from automated_reporting import JinjaReportGenerator, ReportExporter
 from memory_evasion import SleepObfuscator
 from edr_evasion_core import SandboxDetector
 from ddos_testing import DDoSTestingEngine, DDoSConfig, DDoSMethod
+from recon import resolver_dominio, scan_portas, extrair_host
 
 # ============================================================================
 # FastAPI App Setup
@@ -114,6 +115,7 @@ async def health():
     return {
         "status": "online",
         "version": "4.0",
+        "versao": "4.0",
         "timestamp": datetime.now().isoformat()
     }
 
@@ -313,10 +315,119 @@ async def get_modules_status():
                 "name": "Orquestrador",
                 "status": "ready",
                 "description": "Orquestração central de operações"
+            },
+            "recon": {
+                "name": "Reconhecimento",
+                "status": "ready",
+                "description": "Resolução de domínio e varredura de portas"
             }
         },
         "timestamp": datetime.now().isoformat()
     }
+
+@app.post("/api/recon/resolve")
+async def resolve_domain(target: str):
+    """Resolve domain to IP addresses"""
+    try:
+        resultado = resolver_dominio(target)
+        log_operation('Recon', 'Domain resolved', target)
+        return resultado
+    except Exception as e:
+        log_operation('ERROR', 'Recon resolve failed', str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/recon/scan")
+async def scan_ports(target: str, ports: str = "top", timeout: float = 1.0, workers: int = 50):
+    """Scan ports on target"""
+    try:
+        host = extrair_host(target)
+        portas_list = parse_portas(ports)
+
+        aberta = scan_portas(
+            ip=host,
+            portas=portas_list,
+            host=host,
+            timeout=timeout,
+            workers=workers,
+            banner=True
+        )
+
+        log_operation('Recon', 'Port scan completed', f'{host}:{ports}')
+        return {
+            'target': target,
+            'host': host,
+            'ports_scanned': len(portas_list),
+            'open_ports': aberta,
+            'timestamp': datetime.now().isoformat()
+        }
+    except Exception as e:
+        log_operation('ERROR', 'Recon scan failed', str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/modules/config/{module_name}")
+async def get_module_config(module_name: str):
+    """Get configuration of specific module"""
+    modules_config = {
+        "edr_evasion": {
+            "name": "Evasão EDR",
+            "version": "4.0",
+            "status": "ready",
+            "features": ["ROP Gadget Discovery", "Indirect Syscalls", "Module Stomping", "Sandbox Detection"]
+        },
+        "memory_evasion": {
+            "name": "Evasão de Memória",
+            "version": "4.0",
+            "status": "ready",
+            "features": ["Sleep Obfuscation (Ekko)", "Stack Spoofing", "Memory Encryption", "APC Abuse"]
+        },
+        "telemetry_bypass": {
+            "name": "Bypass de Telemetria",
+            "version": "4.0",
+            "status": "ready",
+            "features": ["AMSI Bypass (VEH)", "ETW Disabling", "Log Manipulation", "Sysmon Evasion"]
+        },
+        "c2_framework": {
+            "name": "Framework C2",
+            "version": "4.0",
+            "status": "ready",
+            "features": ["Malleable C2 Profiles", "Beacon Management", "Redirector Cascades", "Protocol Support"]
+        },
+        "post_exploitation": {
+            "name": "Pós-Exploração",
+            "version": "4.0",
+            "status": "ready",
+            "features": ["COFF Execution", "BOF Execution", ".NET Inline Execution", "Mimikatz/BloodHound"]
+        },
+        "bas_engine": {
+            "name": "Motor BAS",
+            "version": "4.0",
+            "status": "ready",
+            "features": ["14 MITRE Tactics", "40+ Techniques", "Severity Scoring", "Attack Paths"]
+        },
+        "ddos_testing": {
+            "name": "Teste DDoS",
+            "version": "4.0",
+            "status": "ready",
+            "features": ["SYN Flood", "UDP Flood", "HTTP Flood", "Slowloris", "DNS Amplification"]
+        },
+        "automated_reporting": {
+            "name": "Relatórios",
+            "version": "4.0",
+            "status": "ready",
+            "features": ["Jinja2 Templates", "HTML/PDF Export", "Auto-Generation", "Recommendations"]
+        },
+        "orchestrator": {
+            "name": "Orquestrador",
+            "version": "4.0",
+            "status": "ready",
+            "features": ["5-Phase Operations", "Module Coordination", "Result Aggregation", "Timeline"]
+        }
+    }
+
+    if module_name in modules_config:
+        return modules_config[module_name]
+    else:
+        raise HTTPException(status_code=404, detail="Módulo não encontrado")
 
 # ============================================================================
 # Operations Logging
@@ -382,6 +493,11 @@ async def ddos_page(request: Request):
     """DDoS testing page"""
     return templates.TemplateResponse("ddos.html", {"request": request})
 
+@app.get("/recon", response_class=HTMLResponse)
+async def recon_page(request: Request):
+    """Reconnaissance page"""
+    return templates.TemplateResponse("recon.html", {"request": request})
+
 # ============================================================================
 # Helper Functions
 # ============================================================================
@@ -396,6 +512,30 @@ def _validate_ddos_authorization(target_host: str) -> bool:
         '172.28.', '172.29.', '172.30.', '172.31.'
     ]
     return any(target_host.startswith(r) for r in authorized_ranges)
+
+def parse_portas(spec):
+    """Parse port specification (top, 1-1024, 80,443, etc)"""
+    spec = spec.strip().lower()
+    TOP_PORTS = [20, 21, 22, 23, 25, 53, 67, 69, 80, 110, 111, 123, 135, 137, 139, 143, 161, 389,
+                 443, 445, 465, 514, 587, 631, 636, 993, 995, 1080, 1433, 1521, 2049, 2375, 2376,
+                 3000, 3306, 3389, 4444, 5000, 5432, 5601, 5900, 5985, 6379, 7001, 8000, 8008, 8080,
+                 8081, 8443, 8888, 9000, 9090, 9200, 9300, 11211, 15672, 27017]
+
+    if spec in ("top", "comuns"):
+        return TOP_PORTS
+
+    portas = set()
+    for parte in spec.split(","):
+        parte = parte.strip()
+        if "-" in parte:
+            ini, fim = parte.split("-", 1)
+            ini, fim = int(ini), int(fim)
+            for p in range(ini, fim + 1):
+                portas.add(p)
+        else:
+            portas.add(int(parte))
+
+    return sorted(portas)
 
 # ============================================================================
 # Error Handlers

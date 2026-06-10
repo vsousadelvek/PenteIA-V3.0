@@ -14,7 +14,7 @@
     <div class="col-md-6">
         <div class="card bg-dark border-secondary">
             <div class="card-header bg-dark border-secondary">
-                <h5 class="mb-0"><i class="fas fa-edit text-info"></i> Report Configuration</h5>
+                <h5 class="mb-0"><i class="fas fa-edit text-info"></i> Configuração do Relatório</h5>
             </div>
             <div class="card-body">
                 <div class="mb-3">
@@ -37,7 +37,7 @@
                     </select>
                 </div>
                 <button class="btn btn-outline-success w-100" id="generate-btn">
-                    <i class="fas fa-cogs"></i> Generate Report
+                    <i class="fas fa-cogs"></i> Gerar Relatório
                 </button>
             </div>
         </div>
@@ -46,13 +46,13 @@
     <div class="col-md-6">
         <div class="card bg-dark border-secondary">
             <div class="card-header bg-dark border-secondary">
-                <h5 class="mb-0"><i class="fas fa-file text-warning"></i> Export Formats</h5>
+                <h5 class="mb-0"><i class="fas fa-file text-warning"></i> Export Formatos</h5>
             </div>
             <div class="card-body">
-                <p class="text-muted mb-3">Available export formats:</p>
+                <p class="text-muted mb-3">Available export Formatos:</p>
                 <div class="list-group">
                     <div class="list-group-item bg-secondary text-light">
-                        <i class="fas fa-file-code text-info"></i> HTML (Web Format)
+                        <i class="fas fa-file-code text-info"></i> HTML (Web Formato)
                     </div>
                     <div class="list-group-item bg-secondary text-light">
                         <i class="fas fa-file-pdf text-danger"></i> PDF (Print Ready)
@@ -74,7 +74,7 @@
             </div>
             <div class="card-body">
                 <div id="reports-list">
-                    <p class="text-muted">No reports generated yet</p>
+                    <p class="text-muted">Nenhum relatório gerado ainda</p>
                 </div>
             </div>
         </div>
@@ -159,24 +159,25 @@ function updateReportsList() {
             </div>
             <small>Findings: ${r.findings}</small>
             <div class="mt-2">
-                <button class="btn btn-sm btn-outline-info" onclick="downloadReport('${r.id}', 'html')">
-                    <i class="fas fa-download"></i> HTML
+                <button class="btn btn-sm btn-outline-info" onclick="BaixarReport('${r.id}', 'html')">
+                    <i class="fas fa-Baixar"></i> HTML
                 </button>
-                <button class="btn btn-sm btn-outline-danger" onclick="downloadReport('${r.id}', 'pdf')">
-                    <i class="fas fa-download"></i> PDF
+                <button class="btn btn-sm btn-outline-danger" onclick="BaixarReport('${r.id}', 'pdf')">
+                    <i class="fas fa-Baixar"></i> PDF
                 </button>
-                <button class="btn btn-sm btn-outline-primary" onclick="downloadReport('${r.id}', 'docx')">
-                    <i class="fas fa-download"></i> DOCX
+                <button class="btn btn-sm btn-outline-primary" onclick="BaixarReport('${r.id}', 'docx')">
+                    <i class="fas fa-Baixar"></i> DOCX
                 </button>
             </div>
         </div>
     `).join('');
 }
 
-function downloadReport(reportId, format) {
-    alert(`Downloading ${format.toUpperCase()} report: ${reportId}`);
-    // In production, would trigger actual file download
+function BaixarReport(reportId, Formato) {
+    alert(`Baixaring ${Formato.toUpperCase()} report: ${reportId}`);
+    // In production, would trigger actual file Baixar
 }
 </script>
 {% endblock %}
+
 
