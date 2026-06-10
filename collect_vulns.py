@@ -24,6 +24,14 @@ from colorama import init, Fore, Style
 # Inicializa colorama
 init(autoreset=True)
 
+# Garante saída UTF-8 no terminal (evita erros no console do Windows / cp1252)
+import sys as _sys
+try:
+    _sys.stdout.reconfigure(encoding="utf-8")
+    _sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
 # Configurações globais
 SESSION = requests.Session()
 OUTPUT_DIR = "dados_treinamento"
@@ -114,6 +122,61 @@ def carregar_config():
     except Exception as e:
         print(f"{Fore.RED}[!] Erro ao carregar configuração: {str(e)}")
         sys.exit(1)
+
+def descobrir_urls(base_url, max_paginas=50, profundidade=2, recursivo=False, timeout=10):
+    """
+    Descobre páginas com parâmetros (pontos de injeção) a partir de uma URL base.
+    Faz um crawling limitado ao mesmo domínio. Retorna uma lista de URLs completas.
+    """
+    print(f"{Fore.BLUE}[*] Descobrindo URLs a partir de {base_url} "
+          f"(profundidade={profundidade if recursivo else 1}, max={max_paginas})...")
+
+    base_netloc = urlparse(base_url).netloc
+    visitados = set()
+    com_parametros = []
+    # fila de (url, nivel)
+    fila = [(base_url, 0)]
+
+    while fila and len(visitados) < max_paginas:
+        url_atual, nivel = fila.pop(0)
+        if url_atual in visitados:
+            continue
+        visitados.add(url_atual)
+
+        try:
+            resp = SESSION.get(url_atual, timeout=timeout)
+        except Exception:
+            continue
+
+        # Guarda URLs que tenham parâmetros de query (candidatas a injeção)
+        if urlparse(url_atual).query and url_atual not in com_parametros:
+            com_parametros.append(url_atual)
+
+        # Só segue links se o crawling recursivo estiver ativo e dentro da profundidade
+        nivel_max = profundidade if recursivo else 1
+        if nivel >= nivel_max:
+            continue
+
+        try:
+            soup = BeautifulSoup(resp.text, 'html.parser')
+        except Exception:
+            continue
+
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            if href.startswith(('#', 'javascript:', 'mailto:')):
+                continue
+            full = urljoin(url_atual, href)
+            if urlparse(full).netloc != base_netloc:
+                continue
+            if full not in visitados:
+                fila.append((full, nivel + 1))
+
+    print(f"{Fore.GREEN}[+] Descoberta concluída: {len(visitados)} páginas visitadas, "
+          f"{len(com_parametros)} com parâmetros")
+    # Se nada com parâmetros foi achado, ao menos devolve a própria base
+    return com_parametros if com_parametros else [base_url]
+
 
 def autenticar(alvo):
     """Realiza autenticação no alvo se necessário"""
@@ -326,21 +389,53 @@ def salvar_resultados(resultados):
 
 def main():
     """Função principal"""
+    import argparse
+    parser = argparse.ArgumentParser(description='PenteIA - Coleta avançada de dados para treinamento')
+    parser.add_argument('--url', '-u', help='URL base para coleta (ignora os alvos do config)')
+    parser.add_argument('--config', '-c', help='Arquivo de configuração (default: exemplos/config_coleta.json)')
+    parser.add_argument('--discover', '-d', action='store_true', help='Descobrir páginas com parâmetros automaticamente')
+    parser.add_argument('--recursive', '-r', action='store_true', help='Crawling recursivo de links')
+    parser.add_argument('--depth', '-dp', type=int, default=2, help='Profundidade do crawling recursivo (default=2)')
+    parser.add_argument('--max-pages', '-mp', type=int, default=50, help='Máximo de páginas a explorar (default=50)')
+    parser.add_argument('--timeout', '-t', type=int, default=10, help='Timeout das requisições em segundos')
+    parser.add_argument('--yes', '-y', action='store_true', help='Não pedir confirmação (modo automático)')
+    args = parser.parse_args()
+
     print(f"{Fore.CYAN}===== PenteIA - Coleta de Dados para Treinamento =====")
     print(f"{Fore.YELLOW}Este script coleta dados para treinar o modelo de IA.\n")
 
+    # Permite sobrescrever o arquivo de configuração
+    global CONFIG_FILE
+    if args.config:
+        CONFIG_FILE = args.config
+
     # Carrega configuração
     config = carregar_config()
+
+    # Garante a chave de tempos
+    config.setdefault("tempos", {"entre_requisições": 1.0, "timeout": args.timeout})
+    config["tempos"]["timeout"] = args.timeout
+
+    # Se uma URL foi passada, monta os alvos a partir dela (com descoberta opcional)
+    if args.url:
+        if args.discover:
+            paginas = descobrir_urls(args.url, max_paginas=args.max_pages,
+                                     profundidade=args.depth, recursivo=args.recursive,
+                                     timeout=args.timeout)
+        else:
+            paginas = [args.url]
+        config["alvos"] = [{"nome": "alvo-personalizado", "url": args.url, "páginas": paginas}]
 
     # Aviso
     print(f"{Fore.RED}\nATENÇÃO: Este script enviará payloads potencialmente maliciosos")
     print(f"{Fore.RED}         para os alvos configurados. Use APENAS em ambientes")
     print(f"{Fore.RED}         controlados e com permissão explícita.")
 
-    # Confirmação
-    if input(f"\n{Fore.YELLOW}Deseja continuar? (S/N): ").strip().upper() != 'S':
-        print(f"{Fore.BLUE}Operação cancelada.")
-        return
+    # Confirmação (pulada com --yes)
+    if not args.yes:
+        if input(f"\n{Fore.YELLOW}Deseja continuar? (S/N): ").strip().upper() != 'S':
+            print(f"{Fore.BLUE}Operação cancelada.")
+            return
 
     try:
         # Coleta dados

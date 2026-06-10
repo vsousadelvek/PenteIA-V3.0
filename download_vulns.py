@@ -31,6 +31,14 @@ from urllib.parse import urlparse
 # Inicializa colorama
 init(autoreset=True)
 
+# Garante saída UTF-8 no terminal (evita erros no console do Windows / cp1252)
+import sys as _sys
+try:
+    _sys.stdout.reconfigure(encoding="utf-8")
+    _sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
 # Configurações globais
 DOWNLOAD_DIR = "dados_externos"
 CACHE_DIR = os.path.join(DOWNLOAD_DIR, "cache")
@@ -41,8 +49,9 @@ OUTPUT_FILE = os.path.join(OUTPUT_DIR, "dados_vulnerabilidades.csv")
 REPOS = {
     "OWASP ModSecurity CRS": {
         "base_url": "https://github.com/coreruleset/coreruleset",
-        "raw_base": "https://raw.githubusercontent.com/coreruleset/coreruleset/v4.0/dev/",
-        "test_path": "regression-tests/tests/",
+        "repo": "coreruleset/coreruleset",
+        "ref": "main",
+        "test_path": "tests/regression/tests",
         "rules": [
             "REQUEST-920-PROTOCOL-ENFORCEMENT",
             "REQUEST-921-PROTOCOL-ATTACK",
@@ -119,88 +128,116 @@ def baixar_arquivo(url, destino, descricao=None):
         print(f"{Fore.RED}[!] Erro ao baixar {url}: {str(e)}")
         return False
 
+def _extrair_payload_do_teste(test):
+    """Extrai um payload textual de um teste de regressão do CRS."""
+    try:
+        entrada = test['stages'][0]['input']
+    except Exception:
+        try:
+            # Formato alternativo: test['input']
+            entrada = test['input']
+        except Exception:
+            return None
+    if not isinstance(entrada, dict):
+        return None
+    # Campos que costumam conter o vetor de ataque
+    for chave in ('data', 'uri', 'payload'):
+        valor = entrada.get(chave)
+        if isinstance(valor, str) and valor.strip():
+            return valor.strip()
+    return None
+
+
 def baixar_owasp_crs(config, skip_cache=False):
     """
-    Baixa os testes de regressão do OWASP ModSecurity CRS
+    Baixa os testes de regressão do OWASP ModSecurity CRS usando a API do GitHub
+    para LISTAR os arquivos de cada regra (em vez de adivinhar nomes de arquivo).
     """
-    print(f"{Fore.BLUE}[*] Baixando OWASP ModSecurity CRS...")
+    print(f"{Fore.BLUE}[*] Baixando OWASP ModSecurity CRS (via GitHub API)...")
 
-    # Cria o diretório de cache
     cache_dir = os.path.join(CACHE_DIR, "owasp-crs")
     os.makedirs(cache_dir, exist_ok=True)
 
-    base_raw = config['raw_base']
-    test_path = config['test_path']
-    total_arquivos = 0
-    arquivos_baixados = 0
     resultados = []
+    arquivos_processados = 0
+    MAX_ARQUIVOS_POR_REGRA = 200  # limite de segurança
 
-    # Para cada regra
+    repo = config.get("repo", "coreruleset/coreruleset")
+    ref = config.get("ref", "main")
+    api_base = f"https://api.github.com/repos/{repo}/contents"
+
+    # Caminhos candidatos onde ficam os testes de regressão (a estrutura mudou entre versões)
+    candidatos_path = [p.rstrip("/") for p in [
+        config.get("test_path", ""),
+        "tests/regression/tests",
+        "regression-tests/tests",
+    ] if p]
+
+    headers_api = {"Accept": "application/vnd.github+json",
+                   "User-Agent": "PenteIA-Downloader"}
+
     for rule in config['rules']:
-        rule_path = os.path.join(test_path, rule)
         rule_dir = os.path.join(cache_dir, rule)
         os.makedirs(rule_dir, exist_ok=True)
 
-        # Primeiro, precisamos listar os arquivos na pasta
-        # Como o GitHub não fornece API para listar diretórios diretamente, vamos usar uma abordagem alternativa
-        # Testando números de 1 a 1000 para os arquivos de teste
-        for i in tqdm(range(900000, 950000), desc=f"Gerando xpath", ncols=80):
-            file_num = str(i)
-            file_name = f"{file_num}.yaml"
-            file_url = f"{base_raw}{rule_path}/{file_name}"
-            file_path = os.path.join(rule_dir, file_name)
-
-            # Verifica se o arquivo já existe no cache
-            if os.path.exists(file_path) and not skip_cache:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    try:
-                        data = yaml.safe_load(f)
-                        if data and 'tests' in data:
-                            for test in data['tests']:
-                                if 'payload' in test['stages'][0]['input']:
-                                    payload = test['stages'][0]['input']['payload']
-                                    tipo = detectar_tipo_vulnerabilidade(rule)
-                                    resultados.append({
-                                        'payload': payload,
-                                        'tipo': tipo,
-                                        'fonte': 'owasp-crs',
-                                        'regra': rule
-                                    })
-                    except Exception as e:
-                        print(f"{Fore.YELLOW}[!] Erro ao processar {file_path}: {str(e)}")
-                        continue
-                total_arquivos += 1
-                arquivos_baixados += 1
+        # 1) Lista os arquivos da regra
+        listados = None
+        for base_path in candidatos_path:
+            api_url = f"{api_base}/{base_path}/{rule}?ref={ref}"
+            try:
+                r = requests.get(api_url, timeout=30, headers=headers_api)
+                if r.status_code == 200:
+                    listados = r.json()
+                    break
+                elif r.status_code == 403:
+                    print(f"{Fore.YELLOW}[!] Limite de requisições da API do GitHub atingido. "
+                          f"Pulando o restante do CRS.")
+                    return resultados
+            except Exception:
                 continue
 
-            # Tenta baixar o arquivo
-            if baixar_arquivo(file_url, file_path, f"CRS {file_name}"):
-                try:
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        data = yaml.safe_load(f)
-                        if data and 'tests' in data:
-                            for test in data['tests']:
-                                if 'payload' in test['stages'][0]['input']:
-                                    payload = test['stages'][0]['input']['payload']
-                                    tipo = detectar_tipo_vulnerabilidade(rule)
-                                    resultados.append({
-                                        'payload': payload,
-                                        'tipo': tipo,
-                                        'fonte': 'owasp-crs',
-                                        'regra': rule
-                                    })
-                except Exception as e:
-                    print(f"{Fore.YELLOW}[!] Erro ao processar {file_path}: {str(e)}")
+        if not listados or not isinstance(listados, list):
+            print(f"{Fore.YELLOW}[!] Não foi possível listar testes de {rule}; pulando.")
+            continue
+
+        # 2) Filtra os arquivos YAML
+        yaml_files = [it for it in listados
+                      if isinstance(it, dict) and it.get("name", "").endswith((".yaml", ".yml"))]
+        baixados_regra = 0
+
+        for it in tqdm(yaml_files[:MAX_ARQUIVOS_POR_REGRA], desc=f"{rule}", ncols=80, leave=False):
+            file_name = it["name"]
+            file_path = os.path.join(rule_dir, file_name)
+            download_url = it.get("download_url")
+
+            # Usa cache quando possível
+            if not (os.path.exists(file_path) and not skip_cache):
+                if not download_url or not baixar_arquivo(download_url, file_path):
                     continue
 
-                total_arquivos += 1
-                arquivos_baixados += 1
-            else:
-                # Interrompe após vários erros consecutivos (arquivos inexistentes)
-                if i > 900000 + 10 and arquivos_baixados == 0:
-                    break
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    data = yaml.safe_load(f)
+            except Exception:
+                continue
 
-    print(f"{Fore.GREEN}[+] OWASP CRS: {arquivos_baixados} arquivos baixados de {total_arquivos} totais")
+            if data and isinstance(data, dict) and 'tests' in data:
+                tipo = detectar_tipo_vulnerabilidade(rule)
+                for test in data['tests']:
+                    payload = _extrair_payload_do_teste(test)
+                    if payload:
+                        resultados.append({
+                            'payload': payload,
+                            'tipo': tipo,
+                            'fonte': 'owasp-crs',
+                            'regra': rule
+                        })
+            baixados_regra += 1
+            arquivos_processados += 1
+
+        print(f"{Fore.GREEN}[+] {rule}: {baixados_regra} arquivos processados")
+
+    print(f"{Fore.GREEN}[+] OWASP CRS: {arquivos_processados} arquivos, {len(resultados)} payloads extraídos")
     return resultados
 
 def baixar_payloadsallthethings(fonte, config, skip_cache=False):

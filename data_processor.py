@@ -17,6 +17,14 @@ import json
 from datetime import datetime
 from collections import Counter
 
+# Garante saída UTF-8 no terminal (evita erros no console do Windows / cp1252)
+import sys as _sys
+try:
+    _sys.stdout.reconfigure(encoding="utf-8")
+    _sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
 # Imports opcionais para visualizações
 try:
     import matplotlib
@@ -510,9 +518,8 @@ def gerar_estatisticas(df_treino, arquivo_base):
         except Exception as e:
             logger.warning(f"Não foi possível gerar visualizações: {str(e)}")
             logger.warning("Instale matplotlib e seaborn para habilitar visualizações")
-
-        else:
-            logger.info(f"Estatísticas salvas em {diretorio_estatisticas} (visualizações desativadas)")
+    else:
+        logger.info(f"Estatísticas salvas em {diretorio_estatisticas} (visualizações desativadas)")
 
     return estatisticas
 
@@ -632,11 +639,22 @@ def processar_dados(arquivo_entrada=None, arquivo_saida='training_data.csv', ana
         df_treino.to_csv(arquivo_saida, index=False)
         logger.info(f"Dataset de treinamento salvo em: {arquivo_saida}")
 
+        # Grava também o arquivo canônico consumido pelo treinador (treinar_modelo_real.py),
+        # desde que tenhamos a coluna de texto (necessária para o modelo).
+        if 'text' in df_treino.columns:
+            arquivo_canonico = os.path.join('dados_treinamento', 'dados_processados.csv')
+            colunas_canon = [c for c in ['text', 'label', 'tipo_payload'] if c in df_treino.columns]
+            df_treino[colunas_canon].to_csv(arquivo_canonico, index=False)
+            logger.info(f"Arquivo canônico de treinamento atualizado em: {arquivo_canonico}")
+        else:
+            logger.warning("Arquivo de resumo (sem coluna 'text'): dados_processados.csv não foi gerado. "
+                           "Use o arquivo completo (com html_resposta) para treinar o modelo.")
+
         # Imprime estatísticas de balanceamento
         contagem_classes = df_treino['label'].value_counts()
         logger.info(f"Estatísticas de balanceamento do dataset:")
         logger.info(f"Classe 0 (não vulnerável): {contagem_classes.get(0, 0)}")
-        logger.info(f"Classe 1 (vulnerável): {contagem_classes.get(1, 0)})")
+        logger.info(f"Classe 1 (vulnerável): {contagem_classes.get(1, 0)}")
 
         # Verifica se o balanceamento está muito desigual
         if contagem_classes.get(1, 0) == 0:

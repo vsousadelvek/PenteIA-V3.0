@@ -32,15 +32,23 @@ from urllib.parse import urlparse, parse_qs, urljoin, urlunparse, urlencode
 import numpy as np
 import requests
 from bs4 import BeautifulSoup
-import tensorflow as tf
+import joblib
 from colorama import init, Fore, Style
 from tqdm import tqdm
 
 # Inicializa colorama para cores no terminal
 init(autoreset=True)
 
+# Garante saída UTF-8 no terminal (evita erros no console do Windows / cp1252)
+import sys as _sys
+try:
+    _sys.stdout.reconfigure(encoding="utf-8")
+    _sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
 # Constantes globais
-MAX_LENGTH = 2000
+MAX_TEXT_CHARS = 20000          # limita o tamanho do texto analisado por requisição
 PROBABILITY_THRESHOLD = 0.8
 TEMP_FOLDER = "temp_scan"
 SESSION = requests.Session()
@@ -52,12 +60,22 @@ HEADERS = {
 
 def load_config():
     """Carrega a configuração com os payloads de teste"""
-    try:
-        # Primeiro tenta carregar do config.json
-        with open("config.json", "r") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        # Se não encontrar, usa configuração padrão
+    # Preferimos o scanner_config.json (focado em payloads de teste); se não houver,
+    # tentamos config.json; em último caso, usamos um padrão embutido.
+    for caminho in ("scanner_config.json", "config.json"):
+        if os.path.exists(caminho):
+            try:
+                with open(caminho, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                if "payloads" in cfg:
+                    return cfg
+            except json.JSONDecodeError as e:
+                print(f"{Fore.YELLOW}[!] {caminho} é um JSON inválido ({e}). Tentando próxima fonte...")
+            except Exception as e:
+                print(f"{Fore.YELLOW}[!] Erro ao ler {caminho}: {e}. Tentando próxima fonte...")
+
+    # Configuração padrão embutida
+    if True:
         return {
             "payloads": {
                 "sqli": [
@@ -85,60 +103,63 @@ def load_config():
         }
 
 def load_artefacts():
-    """Carrega o modelo treinado e o tokenizer"""
+    """Carrega o modelo treinado e seus metadados, detectando o motor automaticamente.
+
+    O motor é escolhido pelo campo 'engine' em modelos/model_meta.json:
+      - 'pytorch-lstm-attention' -> carrega modelos/penteia_lstm.pt (BiLSTM+Attention)
+      - caso contrário           -> carrega modelos/penteia_model.joblib (scikit-learn)
+    Ambos expõem .predict_proba(), então o resto do scanner é idêntico.
+    """
     try:
-        print(f"{Fore.BLUE}[*] Carregando modelo e tokenizer...")
+        print(f"{Fore.BLUE}[*] Carregando modelo...")
 
-        # Verifica se os arquivos existem
-        model_path = os.path.join("modelos", "penteia_model.h5")
-        tokenizer_path = os.path.join("modelos", "tokenizer.json")
+        meta_path = os.path.join("modelos", "model_meta.json")
+        joblib_path = os.path.join("modelos", "penteia_model.joblib")
+        lstm_path = os.path.join("modelos", "penteia_lstm.pt")
 
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Modelo não encontrado em {model_path}")
+        # Lê metadados (opcionais) para decidir o motor
+        meta = {}
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+            except Exception:
+                meta = {}
 
-        if not os.path.exists(tokenizer_path):
-            raise FileNotFoundError(f"Tokenizer não encontrado em {tokenizer_path}")
+        engine = meta.get("engine", "")
 
-        # Suprime avisos do TensorFlow
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            model = tf.keras.models.load_model(model_path)
+        if engine == "pytorch-lstm-attention" or (not os.path.exists(joblib_path) and os.path.exists(lstm_path)):
+            from modelo_lstm_attention import carregar_lstm
+            if not os.path.exists(lstm_path):
+                raise FileNotFoundError(f"Modelo LSTM não encontrado em {lstm_path}")
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                model = carregar_lstm(lstm_path)
+            print(f"{Fore.GREEN}[+] Modelo BiLSTM+Attention carregado! (versão: {meta.get('version','?')})")
+        else:
+            if not os.path.exists(joblib_path):
+                raise FileNotFoundError(f"Modelo não encontrado em {joblib_path}")
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                model = joblib.load(joblib_path)
+            print(f"{Fore.GREEN}[+] Modelo scikit-learn carregado! (versão: {meta.get('version','?')})")
 
-        # Carrega o tokenizer
-        with open(tokenizer_path, 'r') as f:
-            tokenizer_config = json.load(f)
-
-        # Recria o tokenizer a partir da configuração
-        tokenizer = tf.keras.preprocessing.text.tokenizer_from_json(json.dumps(tokenizer_config))
-
-        print(f"{Fore.GREEN}[+] Modelo e tokenizer carregados com sucesso!")
-        return model, tokenizer
+        return model, meta
 
     except Exception as e:
-        print(f"{Fore.RED}[!] Erro ao carregar o modelo ou tokenizer: {str(e)}")
-        print(f"{Fore.YELLOW}[!] Verifique se você treinou o modelo e se os arquivos estão no diretório 'modelos/'")
+        print(f"{Fore.RED}[!] Erro ao carregar o modelo: {str(e)}")
+        print(f"{Fore.YELLOW}[!] Treine o modelo primeiro: python treinar_modelo_real.py")
+        print(f"{Fore.YELLOW}[!] (ou gere um modelo de demonstração: python criar_modelo_demo.py)")
         sys.exit(1)
 
-def preprocess_text(text, tokenizer, max_length=MAX_LENGTH):
-    """Pré-processa o texto HTML para classificação"""
-    # Converte para string, caso seja None ou outro tipo
+def preprocess_text(text, max_length=MAX_TEXT_CHARS):
+    """Normaliza o texto HTML para classificação pelo pipeline scikit-learn."""
     if text is None:
         text = ""
     if not isinstance(text, str):
         text = str(text)
-
-    # Tokeniza o texto
-    sequences = tokenizer.texts_to_sequences([text])
-
-    # Aplica padding para garantir tamanho uniforme
-    padded_sequences = tf.keras.preprocessing.sequence.pad_sequences(
-        sequences,
-        maxlen=max_length,
-        padding='post',
-        truncating='post'
-    )
-
-    return padded_sequences
+    # O TfidfVectorizer recebe a string diretamente; apenas limitamos o tamanho.
+    return text[:max_length]
 
 def extract_links_and_forms(html, base_url):
     """Extrai todos os links e formulários da página HTML"""
@@ -193,6 +214,22 @@ def extract_links_and_forms(html, base_url):
     except Exception as e:
         print(f"{Fore.RED}[!] Erro ao analisar HTML: {str(e)}")
         return [], []
+
+def _extrair_payload_da_url(test_url, payloads):
+    """Extrai, de forma robusta, qual payload foi injetado na URL de teste."""
+    try:
+        params = parse_qs(urlparse(test_url).query, keep_blank_values=True)
+        valores = [v for lista in params.values() for v in lista]
+        # Prioriza um valor que corresponda exatamente a um payload conhecido
+        for valor in valores:
+            if valor in payloads:
+                return valor
+        # Caso contrário, retorna o último valor (geralmente o parâmetro substituído)
+        if valores:
+            return valores[-1]
+    except Exception:
+        pass
+    return ""
 
 def generate_test_urls(url, payloads):
     """Gera URLs de teste com os payloads"""
@@ -264,13 +301,17 @@ def test_form_with_payloads(form, payloads, session):
 
     return results
 
-def classify_vulnerability(text, model, tokenizer, url, payload=""):
+def classify_vulnerability(text, model, url, payload=""):
     """Classifica o texto para detectar vulnerabilidades"""
     # Pré-processa o texto
-    processed_text = preprocess_text(text, tokenizer)
+    processed_text = preprocess_text(text)
 
-    # Faz a predição
-    prediction = model.predict(processed_text)[0][0]
+    # Faz a predição (probabilidade da classe 1 = vulnerável)
+    try:
+        prediction = float(model.predict_proba([processed_text])[0][1])
+    except AttributeError:
+        # Fallback caso o modelo não exponha predict_proba
+        prediction = float(model.predict([processed_text])[0])
 
     # Classifica a gravidade com base na probabilidade
     if prediction >= PROBABILITY_THRESHOLD:
@@ -320,7 +361,7 @@ def display_banner():
 """
     print(banner)
 
-def scan_page(url, model, tokenizer, config):
+def scan_page(url, model, config):
     """Escaneia uma página em busca de vulnerabilidades"""
     try:
         print(f"\n{Fore.BLUE}[*] Iniciando escaneamento da URL: {url}")
@@ -352,10 +393,10 @@ def scan_page(url, model, tokenizer, config):
             try:
                 test_response = SESSION.get(test_url, headers=HEADERS, timeout=config.get('timeout', 10))
                 # Identifica o payload utilizado
-                payload = urlparse(test_url).query.split('=')[1] if '=' in urlparse(test_url).query else ""
+                payload = _extrair_payload_da_url(test_url, all_payloads)
 
                 # Classifica a resposta
-                result = classify_vulnerability(test_response.text, model, tokenizer, test_url, payload)
+                result = classify_vulnerability(test_response.text, model, test_url, payload)
                 if result["vulnerable"]:
                     vulnerabilities.append(result)
                     # Exibe alerta imediato
@@ -379,10 +420,10 @@ def scan_page(url, model, tokenizer, config):
                 try:
                     test_response = SESSION.get(test_url, headers=HEADERS, timeout=config.get('timeout', 10))
                     # Identifica o payload utilizado
-                    payload = urlparse(test_url).query.split('=')[1] if '=' in urlparse(test_url).query else ""
+                    payload = _extrair_payload_da_url(test_url, all_payloads)
 
                     # Classifica a resposta
-                    result = classify_vulnerability(test_response.text, model, tokenizer, test_url, payload)
+                    result = classify_vulnerability(test_response.text, model, test_url, payload)
                     if result["vulnerable"]:
                         vulnerabilities.append(result)
                         # Exibe alerta imediato
@@ -406,7 +447,6 @@ def scan_page(url, model, tokenizer, config):
                 result = classify_vulnerability(
                     result_data['response_text'],
                     model,
-                    tokenizer,
                     f"{result_data['url']} ({result_data['method']} - {result_data['field']})",
                     result_data['payload']
                 )
@@ -491,8 +531,8 @@ def main():
     else:
         config = load_config()
 
-    # Carrega o modelo e o tokenizer
-    model, tokenizer = load_artefacts()
+    # Carrega o modelo treinado
+    model, meta = load_artefacts()
 
     # Autenticação se necessário
     if args.auth:
@@ -522,7 +562,7 @@ def main():
 
     # Inicia o escaneamento
     start_time = time.time()
-    vulnerabilities = scan_page(args.url, model, tokenizer, config)
+    vulnerabilities = scan_page(args.url, model, config)
     end_time = time.time()
 
     # Exibe o resumo final

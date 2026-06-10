@@ -9,8 +9,11 @@ O scanner de vulnerabilidades com IA é uma ferramenta que analisa aplicações 
 Antes de usar o scanner, certifique-se de que:
 
 1. O ambiente virtual está ativado (se estiver usando um)
-2. O modelo treinado existe em `modelos/penteia_model.h5`
-3. O tokenizer existe em `modelos/tokenizer.json`
+2. O modelo treinado existe em `modelos/penteia_model.joblib`
+3. Os metadados existem em `modelos/model_meta.json`
+
+> Se ainda não treinou um modelo, gere um de demonstração rápido com:
+> `python criar_modelo_demo.py`
 
 ## 🚀 Comandos básicos
 

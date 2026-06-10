@@ -70,6 +70,14 @@ O coletor também suporta outros ambientes de teste populares. Confira os arquiv
 - **Análise comparativa** entre diferentes conjuntos de dados
 - **Exportação de visualizações** em formato PNG de alta resolução
 
+### Reconhecimento (recon.py)
+- **Resolução de domínio/URL → IP(s)** (DNS, IPv4 e IPv6)
+- **Varredura de portas TCP** (connect scan) na faixa escolhida pelo usuário
+- **Execução paralela** (multi-threading) com timeout e nº de workers ajustáveis
+- **Identificação de serviços** comuns e **captura de banner** opcional
+- **Sugestão automática** de alvos para o scanner (portas web abertas)
+- **Relatórios em JSON** e travas de uso ético (confirmação para IPs públicos)
+
 ### Scanner de Vulnerabilidades (scanner.py)
 - **Detecção em tempo real** de vulnerabilidades usando IA
 - **Análise de links e formulários** para encontrar pontos de injeção
@@ -95,20 +103,25 @@ O coletor também suporta outros ambientes de teste populares. Confira os arquiv
 
 ## 📋 Requisitos
 
-- Python 3.6 ou superior
+- Python 3.8 ou superior (testado em Python 3.14)
 - Docker (para ambientes de teste)
-- Bibliotecas Python:
+- Bibliotecas Python (ver `requirements.txt`):
   - requests>=2.28.0
   - pandas>=1.4.0
-  - urllib3>=1.26.12
-  - numpy>=1.23.5
-  - matplotlib>=3.6.2 (opcional, para visualizações)
-  - seaborn>=0.12.1 (opcional, para visualizações avançadas)
-  - scikit-learn>=1.2.0 (opcional, para análise avançada)
+  - numpy>=1.23.0
+  - **scikit-learn>=1.2.0** (motor de IA — TF-IDF + Regressão Logística)
+  - **joblib>=1.2.0** (persistência do modelo)
+  - beautifulsoup4>=4.11.0 (para análise de HTML)
+  - PyYAML>=6.0 (para o download de dados do OWASP CRS)
   - tqdm>=4.64.0 (para indicadores de progresso)
   - colorama>=0.4.5 (para saída colorida no terminal)
-  - beautifulsoup4>=4.11.0 (para análise de HTML)
-  - tensorflow>=2.10.0 (para execução do modelo de IA)
+  - psutil>=5.9.0 (informações de sistema)
+  - matplotlib>=3.6.0 / seaborn>=0.12.0 (opcionais, para visualizações)
+
+> ℹ️ **Nota sobre o motor de IA**: a partir da v3.0 o PenteIA usa **scikit-learn**
+> (TF-IDF + Regressão Logística) em vez de TensorFlow/Keras. É leve, roda em CPU e é
+> compatível com versões recentes do Python. O modelo é salvo em
+> `modelos/penteia_model.joblib` (com metadados em `modelos/model_meta.json`).
 
 ## 🔧 Instalação
 
@@ -123,6 +136,28 @@ pip install -r requirements.txt
 # Configurar ambiente de teste
 ./setup_dvwa.sh
 ```
+
+## 🛡️ IMPORTANTE: Exclusão do Antivírus (Windows)
+
+Os datasets de treinamento gerados pelo PenteIA contêm **payloads reais** (webshells,
+SQL injection, XSS, etc.). O **Windows Defender** (e outros antivírus) podem colocar
+esses arquivos `.csv` em **quarentena automaticamente**, fazendo-os "sumir" do disco —
+o que quebra a etapa de treinamento.
+
+Antes de gerar/treinar dados, adicione uma exclusão para a pasta do projeto. Abra o
+**PowerShell como Administrador** e rode:
+
+```powershell
+Add-MpPreference -ExclusionPath 'E:\cyber\PenteIA-V3.0'
+```
+
+> Isso é uma prática padrão para ferramentas de segurança (repositórios de payloads,
+> nuclei templates, etc. exigem o mesmo). A exclusão só afeta esta pasta de laboratório.
+> Para conferir: `(Get-MpPreference).ExclusionPath`
+
+O **scanner** funciona normalmente sem a exclusão (o modelo é salvo em formato binário
+`.joblib`, que não é afetado). A exclusão é necessária apenas para a **geração e o
+treinamento** com dados que contêm payloads.
 
 ## ⚙️ Configuração
 
@@ -221,6 +256,88 @@ python treinar_modelo_real.py
 
 # Treinar com configurações específicas de memória
 python treinar_modelo_real.py --memoria_limitada
+```
+
+#### Motores de IA disponíveis (`--engine`)
+
+O PenteIA tem **dois motores**, ambos com a mesma interface (texto → probabilidade) e
+ambos implantáveis em **CPU**:
+
+| Motor | Comando | Quando usar |
+|-------|---------|-------------|
+| **scikit-learn** (padrão) | `python treinar_modelo_real.py` | TF-IDF + Regressão Logística. Leve, rápido no treino e na inferência. Recomendado para **produção em CPU**. |
+| **BiLSTM + Attention** | `python treinar_modelo_real.py --engine lstm --epochs 8` | Rede neural (PyTorch) com attention aditiva sobre o LSTM. Maior capacidade; treino mais lento. Requer `pip install torch`. |
+
+```bash
+# Motor neural (BiLSTM + Attention)
+python treinar_modelo_real.py --engine lstm --epochs 8
+```
+
+- O **scanner detecta automaticamente** qual motor foi treinado por último (via
+  `modelos/model_meta.json`) — não é preciso configurar nada.
+- **GPU no treino, CPU na produção**: o motor `lstm` usa a **GPU automaticamente** se
+  houver uma disponível (requer PyTorch com CUDA: `pip install torch --index-url
+  https://download.pytorch.org/whl/cu121`). O modelo salvo é **portátil** e sempre
+  carrega/roda em **CPU** na inferência — ideal para produção sem GPU.
+- **Flash Attention** é um kernel de GPU para Transformers e **não se aplica** a este
+  cenário (produção em CPU + arquitetura LSTM).
+
+### Reconhecimento (recon.py)
+
+Antes de escanear vulnerabilidades, o módulo `recon.py` faz o **reconhecimento** do
+alvo: resolve o domínio para IP(s) e varre as portas TCP na faixa que você escolher
+(*connect scan* simples, sem evasão). As portas web abertas viram alvos sugeridos para
+o scanner.
+
+```bash
+# Apenas resolver o domínio para IP(s)
+python recon.py exemplo.com --resolve-only
+
+# Varrer as portas comuns (padrão "top")
+python recon.py exemplo.com
+
+# Faixa de portas escolhida pelo usuário (intervalos e/ou listas)
+python recon.py exemplo.com --ports 1-1024
+python recon.py 192.168.0.10 --ports 22,80,443,3000,8080 --banner
+
+# Varredura completa (1-65535) — mais lenta; aumente os workers
+python recon.py alvo.com --ports all --workers 300 --timeout 0.5
+
+# Modo automático (sem confirmação) para scripts
+python recon.py http://alvo.com --ports top -y
+```
+
+| Opção | Descrição |
+|-------|-----------|
+| `alvo` | **OBRIGATÓRIO**: domínio, URL ou IP |
+| `--ports` / `-p` | Faixa: `top` (padrão), `all`, `1-1024`, `80,443,8080`... |
+| `--timeout` / `-t` | Timeout-base por porta em s (default: 1.0; piso do adaptativo) |
+| `--workers` / `-w` | Conexões simultâneas (default: 50, máx: 500). Valores altos perdem precisão por rajada de SYN |
+| `--banner` / `-b` | Captura banner dos serviços abertos (HTTP→`Server:`, TLS→versão/CN, binário→hex) |
+| `--no-adaptive` | Desativa o timeout adaptativo (mede o RTT do host e ajusta o timeout) |
+| `--no-retry` | Desativa o passe de reteste (rechecagem cuidadosa das portas filtradas) |
+| `--resolve-only` | Apenas resolve o domínio (não varre portas) |
+| `--yes` / `-y` | Não pedir confirmação (modo automático) |
+
+O relatório é salvo em `relatorios/recon_[host]_[timestamp].json`.
+
+**Recursos do scanner de portas:**
+- **Timeout adaptativo**: mede o RTT até o host e ajusta o timeout (mais preciso em redes lentas).
+- **Estados precisos**: distingue `aberta` / `fechada` (RST) / `filtrada` (timeout/firewall).
+- **Passe de reteste**: as portas filtradas são rechecadas com timeout maior e baixa concorrência.
+- **Banner por serviço**: `GET` para HTTP (extrai `Server:`), handshake para TLS (versão + CN do certificado), e **hex** para banners binários.
+
+> ⚠️ *Connect scan* simples não é um motor de timing com controle de congestionamento (como o
+> Nmap). Em hosts remotos com rate-limiting/firewall, prefira **faixas menores** e **baixa
+> concorrência** para resultados confiáveis.
+
+> ⚠️ Varredura de portas só deve ser feita em hosts com **autorização explícita**.
+> O módulo avisa e pede confirmação ao detectar IPs públicos.
+
+**Fluxo recon → scanner:**
+```bash
+python recon.py alvo-autorizado.com --ports 1-10000   # descobre portas web abertas
+python scanner.py --url http://alvo-autorizado.com:8080/   # escaneia o que foi achado
 ```
 
 ### Scanner de Vulnerabilidades
@@ -437,7 +554,7 @@ Para dúvidas, sugestões ou colaborações, entre em contato através do GitHub
 <p align="center">
   Desenvolvido com ❤️ para a comunidade de segurança e IA<br>
   <b>PenteIA v3.0</b> - Sistema de Coleta, Análise e Detecção de Vulnerabilidades<br>
-  © 2023-2025 Todos os direitos reservados
+  © 2023-2025 — Distribuído sob a Licença MIT (veja o arquivo LICENSE)
 </p>
 
 > ⚠️ **AVISO ÉTICO**: Utilize esta ferramenta apenas em sistemas para os quais você tem permissão explícita para testar. O uso indevido pode violar leis de segurança cibernética.

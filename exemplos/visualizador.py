@@ -12,6 +12,13 @@ import os
 import sys
 import glob
 
+# Garante saída UTF-8 no terminal (evita erros no console do Windows / cp1252)
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
 def encontrar_arquivo_mais_recente(diretorio='dados_treinamento', padrao='training_*.csv'):
     """Encontra o arquivo de dados de treinamento mais recente"""
     arquivos = glob.glob(os.path.join(diretorio, padrao))

@@ -17,6 +17,14 @@ from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from concurrent.futures import ThreadPoolExecutor
 from requests.exceptions import RequestException, Timeout, ConnectionError
 
+# Garante saída UTF-8 no terminal (evita erros no console do Windows / cp1252)
+import sys as _sys
+try:
+    _sys.stdout.reconfigure(encoding="utf-8")
+    _sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
 # Configurações padrão
 CONFIG_FILE = 'config.json'
 DEFAULT_CONFIG = {
@@ -408,10 +416,24 @@ def configurar_logging():
 
 def main():
     """Função principal do programa"""
+    import argparse
+    parser = argparse.ArgumentParser(description='PenteIA - Coletor de dados de vulnerabilidades')
+    parser.add_argument('--config', '-c', help='Arquivo de configuração a usar (default: config.json)')
+    parser.add_argument('--auto', action='store_true',
+                        help='Modo automático (sem interação); mantido por compatibilidade')
+    args = parser.parse_args()
+
+    # Permite sobrescrever o arquivo de configuração
+    global CONFIG_FILE
+    if args.config:
+        CONFIG_FILE = args.config
+
     # Configurar logging
     global logger
     logger = configurar_logging()
     logger.info("Iniciando coleta de dados para treinamento de IA de segurança...")
+    if args.config:
+        logger.info(f"Usando arquivo de configuração: {CONFIG_FILE}")
 
     try:
         # Verificar se é necessário criar o arquivo de configuração

@@ -1,34 +1,33 @@
-# Arquivos gerados pelo script
+# Resultados e logs (gerados)
 resultados/
 logs/
 raw_data*.csv
 
-# Arquivos de ambiente Python
+# Dados de treinamento e externos (gerados / contêm payloads)
+dados_treinamento/
+dados_externos/
+
+# Modelos treinados (gerados) — mantém apenas o placeholder
+modelos/*
+!modelos/.gitkeep
+
+# Relatórios gerados (recon/scanner) — mantém apenas o placeholder
+relatorios/*
+!relatorios/.gitkeep
+
+# Ambiente Python
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
+.Python
 .env
 .venv
 env/
 venv/
 ENV/
 
-# Arquivos de distribuição/empacotamento
-dist/
-build/
-*.egg-info/
-# Resultados e logs
-resultados/
-logs/
-dados_treinamento/
-
-# Arquivos Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-env/
+# Distribuição / empacotamento
 build/
 develop-eggs/
 dist/
@@ -44,27 +43,12 @@ var/
 .installed.cfg
 *.egg
 
-# Arquivos de ambiente
-.env
-.venv
-venv/
-ENV/
-
 # IDEs e editores
 .idea/
 .vscode/
 *.swp
 *.swo
 
-# Sistema Operacional
+# Sistema operacional
 .DS_Store
 Thumbs.db
-# Arquivos temporários do sistema
-.DS_Store
-Thumbs.db
-
-# Arquivos de IDE
-.idea/
-.vscode/
-*.swp
-*.swo
