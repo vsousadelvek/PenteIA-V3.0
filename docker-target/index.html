@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="csrf-token" content="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjc3JmIjoidGVzdCJ9.demo">
+  <title>CorpTech Solutions — Tecnologia Empresarial</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --primary: #0f62fe;
+      --bg: #f4f4f4;
+      --dark: #161616;
+      --surface: #ffffff;
+      --border: #e0e0e0;
+      --text: #161616;
+      --muted: #6f6f6f;
+    }
+    body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); }
+    nav {
+      background: var(--dark); color: white; padding: 0 32px;
+      display: flex; align-items: center; justify-content: space-between; height: 48px;
+      position: sticky; top: 0; z-index: 100;
+      box-shadow: 0 2px 8px rgba(0,0,0,.4);
+    }
+    nav .logo { font-weight: 700; font-size: 1.1em; letter-spacing: .5px; color: #78a9ff; }
+    nav ul { list-style: none; display: flex; gap: 24px; }
+    nav ul li a { color: #c6c6c6; text-decoration: none; font-size: .9em; transition: color .2s; }
+    nav ul li a:hover { color: white; }
+    nav .nav-cta {
+      background: var(--primary); color: white; border: none;
+      padding: 6px 16px; border-radius: 2px; cursor: pointer; font-size: .85em;
+    }
+    .hero {
+      background: linear-gradient(135deg, #0f62fe 0%, #0043ce 60%, #001d6c 100%);
+      color: white; padding: 80px 32px; text-align: center;
+    }
+    .hero h1 { font-size: 2.8em; font-weight: 300; margin-bottom: 16px; }
+    .hero h1 strong { font-weight: 700; }
+    .hero p { font-size: 1.1em; color: #a6c8ff; max-width: 600px; margin: 0 auto 32px; }
+    .hero-btn {
+      background: white; color: var(--primary); border: none;
+      padding: 12px 28px; border-radius: 2px; font-size: 1em; font-weight: 600;
+      cursor: pointer; margin-right: 12px; transition: opacity .2s;
+    }
+    .hero-btn:hover { opacity: .9; }
+    .hero-btn.outline { background: transparent; color: white; border: 1px solid white; }
+    .container { max-width: 1100px; margin: 0 auto; padding: 0 32px; }
+    .section { padding: 64px 0; }
+    .section h2 { font-size: 2em; font-weight: 300; margin-bottom: 8px; }
+    .section .subtitle { color: var(--muted); margin-bottom: 40px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 24px; }
+    .card {
+      background: white; border: 1px solid var(--border); padding: 28px; border-radius: 4px;
+      transition: box-shadow .2s;
+    }
+    .card:hover { box-shadow: 0 4px 20px rgba(0,0,0,.1); }
+    .card-icon { font-size: 2em; margin-bottom: 12px; }
+    .card h3 { font-size: 1.1em; margin-bottom: 8px; }
+    .card p { color: var(--muted); font-size: .9em; line-height: 1.6; }
+    .stats { background: var(--dark); color: white; padding: 48px 0; }
+    .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 32px; text-align: center; }
+    .stat-num { font-size: 2.5em; font-weight: 700; color: #78a9ff; }
+    .stat-label { color: #a8a8a8; font-size: .85em; margin-top: 4px; }
+    .cta-section { background: #e8f1ff; padding: 64px 32px; text-align: center; }
+    .cta-section h2 { font-size: 2em; margin-bottom: 12px; color: #0043ce; }
+    .cta-section p { color: var(--muted); margin-bottom: 28px; }
+    .btn-primary {
+      background: var(--primary); color: white; border: none;
+      padding: 12px 32px; border-radius: 2px; font-size: 1em; cursor: pointer;
+    }
+    footer {
+      background: #262626; color: #a8a8a8; padding: 40px 32px;
+      display: flex; justify-content: space-between; flex-wrap: wrap; gap: 24px;
+    }
+    footer .footer-logo { color: #78a9ff; font-weight: 700; font-size: 1.1em; }
+    footer p { font-size: .85em; margin-top: 8px; }
+    footer ul { list-style: none; display: flex; gap: 16px; flex-wrap: wrap; font-size: .85em; }
+    footer ul a { color: #a8a8a8; text-decoration: none; }
+    footer ul a:hover { color: white; }
+    .tag {
+      display: inline-block; background: #dde1ff; color: #0043ce;
+      font-size: .7em; padding: 2px 8px; border-radius: 2px; font-weight: 600;
+      margin-bottom: 10px; letter-spacing: .5px;
+    }
+    .security-badge {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: rgba(255,255,255,.1); border: 1px solid rgba(255,255,255,.2);
+      padding: 6px 14px; border-radius: 20px; font-size: .8em; margin-top: 20px;
+    }
+  </style>
+</head>
+<body>
+
+<nav>
+  <span class="logo">CorpTech Solutions</span>
+  <ul>
+    <li><a href="/about">Empresa</a></li>
+    <li><a href="/products">Produtos</a></li>
+    <li><a href="/api/v1/status">API Status</a></li>
+    <li><a href="/contact">Contato</a></li>
+  </ul>
+  <button class="nav-cta" onclick="window.location='/login'">Acessar Sistema</button>
+</nav>
+
+<div class="hero">
+  <h1>Tecnologia que <strong>impulsiona</strong> seu negócio</h1>
+  <p>Soluções empresariais de alto desempenho para empresas que não podem parar. Segurança, escalabilidade e confiabilidade em uma única plataforma.</p>
+  <button class="hero-btn">Começar agora</button>
+  <button class="hero-btn outline">Ver demonstração</button>
+  <div class="security-badge">
+    🔒 Certificado ISO 27001 · SOC 2 Type II · LGPD Compliant
+  </div>
+</div>
+
+<section class="section">
+  <div class="container">
+    <h2>Nossas Soluções</h2>
+    <p class="subtitle">Plataformas integradas para cada área do seu negócio</p>
+    <div class="grid-3">
+      <div class="card">
+        <div class="card-icon">🏢</div>
+        <span class="tag">ERP</span>
+        <h3>ERP Corporativo</h3>
+        <p>Sistema de gestão integrada com módulos de finanças, RH, estoque e produção. Integração via REST API com mais de 200 conectores disponíveis.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">📊</div>
+        <span class="tag">CRM</span>
+        <h3>CRM Premium</h3>
+        <p>Gestão completa do ciclo de vida do cliente. Pipeline visual, automação de vendas e analytics em tempo real com Machine Learning integrado.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">☁️</div>
+        <span class="tag">CLOUD</span>
+        <h3>Cloud Storage Enterprise</h3>
+        <p>Armazenamento corporativo com criptografia AES-256, backup automático e CDN global. 99.99% de uptime garantido em SLA.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="stats">
+  <div class="container">
+    <div class="stats-grid">
+      <div><div class="stat-num">2.400+</div><div class="stat-label">Clientes Ativos</div></div>
+      <div><div class="stat-num">99.99%</div><div class="stat-label">Uptime SLA</div></div>
+      <div><div class="stat-num">R$ 2.1B</div><div class="stat-label">Volume Processado</div></div>
+      <div><div class="stat-num">8ms</div><div class="stat-label">Latência Média API</div></div>
+    </div>
+  </div>
+</div>
+
+<section class="cta-section">
+  <h2>Pronto para começar?</h2>
+  <p>Fale com nosso time de vendas e receba uma demonstração personalizada.</p>
+  <button class="btn-primary" onclick="window.location='/contact'">Solicitar demonstração</button>
+</section>
+
+<footer>
+  <div>
+    <div class="footer-logo">CorpTech Solutions</div>
+    <p>© 2026 CorpTech Solutions LTDA. Todos os direitos reservados.</p>
+    <p style="margin-top:4px;font-size:.75em;color:#555">CNPJ: 12.345.678/0001-90 · São Paulo, SP</p>
+  </div>
+  <ul>
+    <li><a href="/about">Sobre</a></li>
+    <li><a href="/products">Produtos</a></li>
+    <li><a href="/contact">Contato</a></li>
+    <li><a href="/robots.txt">robots.txt</a></li>
+    <li><a href="/api/v1/status">API Status</a></li>
+    <li><a href="/login">Login</a></li>
+  </ul>
+</footer>
+
+</body>
+</html>
