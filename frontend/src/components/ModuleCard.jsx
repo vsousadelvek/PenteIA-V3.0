@@ -1,6 +1,6 @@
-import React from 'react'
+import React, { memo } from 'react'
 
-export default function ModuleCard({ name, icon: Icon, color, description }) {
+const ModuleCard = memo(function ModuleCard({ name, icon: Icon, color, description }) {
   const colors = {
     red: 'text-red-600 border-red-600/30 hover:border-red-600',
     blue: 'text-blue-600 border-blue-600/30 hover:border-blue-600',
@@ -23,4 +23,6 @@ export default function ModuleCard({ name, icon: Icon, color, description }) {
       </div>
     </div>
   )
-}
+})
+
+export default ModuleCard

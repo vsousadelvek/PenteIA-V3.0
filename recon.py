@@ -253,13 +253,18 @@ def checar_porta(ip, porta, timeout):
         return "filtered"
 
 
-def _passada(ip, portas, timeout, workers, desc):
+def _passada(ip, portas, timeout, workers, desc, progress_cb=None, _offset=0, _total=None):
     """Uma passada de varredura. Retorna {porta: estado}."""
     estados = {}
+    _total = _total or len(portas)
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futuros = {executor.submit(checar_porta, ip, p, timeout): p for p in portas}
+        done = 0
         for futuro in tqdm(as_completed(futuros), total=len(futuros), desc=desc, ncols=80, leave=False):
             estados[futuros[futuro]] = futuro.result()
+            done += 1
+            if progress_cb:
+                progress_cb(_offset + done, _total)
     return estados
 
 
@@ -328,13 +333,14 @@ def grab_banner(ip, porta, host, timeout):
 
 
 def scan_portas(ip, portas, host=None, timeout=1.0, workers=100, banner=False,
-                retry=True, retry_timeout=None):
+                retry=True, retry_timeout=None, progress_cb=None):
     """Varre as portas (com passe de reteste opcional) e devolve a lista de abertas."""
     workers = max(1, min(workers, 500))  # teto de segurança
 
     print(f"\n{Fore.BLUE}[*] Varrendo {len(portas)} porta(s) em {Fore.WHITE}{ip}{Fore.BLUE} "
           f"(timeout={timeout:.2f}s, workers={workers})...")
-    estados = _passada(ip, portas, timeout, workers, "Portas")
+    estados = _passada(ip, portas, timeout, workers, "Portas",
+                       progress_cb=progress_cb, _offset=0, _total=len(portas))
 
     # Passe de reteste: só as portas que deram timeout (filtradas), com timeout maior
     # e CONCORRÊNCIA BAIXA (segundo olhar cuidadoso — evita perda por rajada de SYN).

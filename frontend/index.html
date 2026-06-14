@@ -4,6 +4,22 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>PenteIA v4.0 - Plataforma Red Team</title>
+    <script>
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.getRegistrations().then(function(regs) {
+          if (regs.length > 0) {
+            Promise.all(regs.map(function(r) { return r.unregister(); })).then(function() {
+              if ('caches' in window) {
+                caches.keys().then(function(names) {
+                  names.forEach(function(n) { caches.delete(n); });
+                });
+              }
+              location.reload();
+            });
+          }
+        });
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>

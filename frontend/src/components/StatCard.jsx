@@ -1,6 +1,6 @@
-import React from 'react'
+import React, { memo } from 'react'
 
-export default function StatCard({ title, value, icon: Icon, color = 'red' }) {
+const StatCard = memo(function StatCard({ title, value, icon: Icon, color = 'red' }) {
   const colors = {
     red: 'border-red-600 text-red-600',
     blue: 'border-blue-600 text-blue-600',
@@ -15,8 +15,10 @@ export default function StatCard({ title, value, icon: Icon, color = 'red' }) {
           <p className="text-gray-400 text-sm font-medium">{title}</p>
           <p className="text-3xl font-bold text-gray-100 mt-2">{value}</p>
         </div>
-        {Icon && <Icon className={`w-8 h-8 ${colors[color]}`} />}
+        {Icon && <Icon className={`w-8 h-8 ${colors[color]}`} strokeWidth={1.5} />}
       </div>
     </div>
   )
-}
+})
+
+export default StatCard
