@@ -14,6 +14,7 @@ class User(Base):
     email = Column(String, unique=True, index=True, nullable=False)
     password_hash = Column(String, nullable=False)
     is_admin = Column(Boolean, default=False, server_default='0')
+    role = Column(String, default="user", server_default="'user'")
     credits = Column(Integer, default=0, server_default='0')
     status = Column(String, default="active", server_default="'active'")
     created_at = Column(DateTime, default=datetime.utcnow)

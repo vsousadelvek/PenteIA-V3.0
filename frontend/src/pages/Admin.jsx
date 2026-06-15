@@ -2,10 +2,165 @@ import React, { useState, useEffect, useCallback } from 'react'
 import {
   Users, Plus, Edit2, Trash2, CreditCard, RefreshCw,
   Search, ChevronUp, ChevronDown, X, Save, AlertTriangle,
-  UserCheck, Crown
+  UserCheck, Crown, Webhook, CheckCircle, XCircle, Loader
 } from 'lucide-react'
 import { useToast } from '../components/Toast'
 import api from '../api'
+
+function WebhooksSection() {
+  const toast = useToast()
+  const [webhooks, setWebhooks] = useState([])
+  const [showAdd, setShowAdd] = useState(false)
+  const [testingId, setTestingId] = useState(null)
+  const [form, setForm] = useState({ name: '', url: '', events: ['simulation_complete'], secret: '' })
+
+  const fetchWebhooks = async () => {
+    try {
+      const r = await api.get('/api/webhooks')
+      setWebhooks(r.data.webhooks || [])
+    } catch {}
+  }
+
+  useEffect(() => { fetchWebhooks() }, [])
+
+  const handleAdd = async () => {
+    if (!form.name.trim() || !form.url.trim()) { toast('Preencha nome e URL', 'warning'); return }
+    try {
+      await api.post('/api/webhooks', { name: form.name, url: form.url, events: form.events, secret: form.secret || undefined })
+      setShowAdd(false)
+      setForm({ name: '', url: '', events: ['simulation_complete'], secret: '' })
+      fetchWebhooks()
+      toast('Webhook criado!', 'success')
+    } catch (err) {
+      toast('Erro: ' + (err.response?.data?.detail || err.message), 'error')
+    }
+  }
+
+  const handleDelete = async (id) => {
+    try {
+      await api.delete(`/api/webhooks/${id}`)
+      fetchWebhooks()
+      toast('Webhook removido', 'success')
+    } catch (err) {
+      toast('Erro: ' + (err.response?.data?.detail || err.message), 'error')
+    }
+  }
+
+  const handleTest = async (id) => {
+    setTestingId(id)
+    try {
+      const r = await api.post(`/api/webhooks/${id}/test`)
+      toast(`Webhook respondeu: HTTP ${r.data.status}`, 'success')
+    } catch (err) {
+      toast('Falha: ' + (err.response?.data?.detail || err.message), 'error')
+    } finally {
+      setTestingId(null)
+    }
+  }
+
+  const toggleEvent = (ev) => {
+    setForm(f => ({
+      ...f,
+      events: f.events.includes(ev) ? f.events.filter(e => e !== ev) : [...f.events, ev]
+    }))
+  }
+
+  return (
+    <div className="bg-dark-800 border border-dark-600 rounded-xl p-6">
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-2">
+          <Webhook className="w-5 h-5 text-cyan-400" />
+          <h2 className="text-xl font-bold text-gray-100">Integrações — Webhooks</h2>
+        </div>
+        <button onClick={() => setShowAdd(true)} className="flex items-center gap-2 text-sm px-3 py-1.5 bg-cyan-700 hover:bg-cyan-600 text-white rounded transition">
+          <Plus className="w-4 h-4" /> Adicionar Webhook
+        </button>
+      </div>
+      <p className="text-gray-400 text-sm mb-4">Receba notificações automáticas quando simulações completarem ou vulnerabilidades críticas forem encontradas.</p>
+
+      {webhooks.length === 0 ? (
+        <div className="text-center py-10 border border-dashed border-dark-600 rounded-lg">
+          <Webhook className="w-8 h-8 text-gray-600 mx-auto mb-3" />
+          <p className="text-gray-500 text-sm">Nenhum webhook configurado ainda.</p>
+          <p className="text-gray-600 text-xs mt-1">Compatível com Slack, Discord, Teams e qualquer endpoint HTTP.</p>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {webhooks.map(hook => (
+            <div key={hook.id} className="flex items-center justify-between p-4 bg-dark-700 border border-dark-600 rounded-lg">
+              <div>
+                <p className="font-semibold text-gray-100">{hook.name}</p>
+                <p className="text-xs text-gray-400 font-mono mt-0.5">{hook.url}</p>
+                <div className="flex gap-1 mt-1">
+                  {(hook.events || []).map(ev => (
+                    <span key={ev} className="text-[10px] px-1.5 py-0.5 rounded bg-dark-600 text-cyan-400 border border-dark-500">{ev}</span>
+                  ))}
+                  {hook.has_secret && <span className="text-[10px] px-1.5 py-0.5 rounded bg-dark-600 text-yellow-400 border border-dark-500">HMAC ✓</span>}
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => handleTest(hook.id)}
+                  disabled={testingId === hook.id}
+                  className="text-xs px-2 py-1 rounded bg-dark-600 hover:bg-dark-500 text-cyan-400 border border-dark-500 transition flex items-center gap-1 disabled:opacity-50"
+                >
+                  {testingId === hook.id ? <Loader className="w-3 h-3 animate-spin" /> : <CheckCircle className="w-3 h-3" />}
+                  Testar
+                </button>
+                <button onClick={() => handleDelete(hook.id)} className="p-1.5 text-gray-400 hover:text-red-400 hover:bg-red-900/20 rounded transition">
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {showAdd && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-dark-800 border border-dark-600 rounded-xl w-full max-w-md">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-dark-700">
+              <h3 className="text-lg font-bold text-gray-100">Adicionar Webhook</h3>
+              <button onClick={() => setShowAdd(false)} className="text-gray-500 hover:text-gray-300 transition"><X className="w-5 h-5" /></button>
+            </div>
+            <div className="p-6 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-1">Nome</label>
+                <input type="text" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="ex: Slack #alerts" className="input-dark w-full" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-1">URL do Webhook</label>
+                <input type="text" value={form.url} onChange={e => setForm(f => ({ ...f, url: e.target.value }))} placeholder="https://hooks.slack.com/..." className="input-dark w-full" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-2">Eventos</label>
+                <div className="space-y-2">
+                  {[
+                    { v: 'simulation_complete', l: 'Simulação Completa' },
+                    { v: 'vuln_critical_found', l: 'Vulnerabilidade Crítica Encontrada' },
+                  ].map(({ v, l }) => (
+                    <label key={v} className="flex items-center gap-2 cursor-pointer text-sm text-gray-300">
+                      <input type="checkbox" checked={form.events.includes(v)} onChange={() => toggleEvent(v)} className="rounded" />
+                      {l}
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-1">Secret HMAC <span className="text-gray-500 font-normal">(opcional)</span></label>
+                <input type="text" value={form.secret} onChange={e => setForm(f => ({ ...f, secret: e.target.value }))} placeholder="senha para assinar os payloads" className="input-dark w-full" />
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 px-6 pb-6">
+              <button onClick={() => setShowAdd(false)} className="px-4 py-2 bg-dark-700 hover:bg-dark-600 text-gray-300 rounded transition">Cancelar</button>
+              <button onClick={handleAdd} className="px-4 py-2 bg-cyan-700 hover:bg-cyan-600 text-white rounded transition">Criar Webhook</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
 
 function Spinner() {
   return <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
@@ -501,6 +656,8 @@ export default function Admin() {
           onSuccess={() => { setDeleteUser(null); fetchData() }}
         />
       )}
+
+      <WebhooksSection />
     </div>
   )
 }

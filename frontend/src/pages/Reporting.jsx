@@ -1,7 +1,40 @@
 import React, { useState, useEffect } from 'react'
-import { Download, FileText, Plus, Loader, BookOpen, Info } from 'lucide-react'
+import { Download, FileText, Plus, Loader, BookOpen, Info, Shield, CheckCircle } from 'lucide-react'
 import { useToast } from '../components/Toast'
 import api from '../api'
+
+const COMPLIANCE_FRAMEWORKS = [
+  {
+    id: 'lgpd',
+    name: 'LGPD',
+    full: 'Lei Geral de Proteção de Dados (Lei 13.709/2018)',
+    desc: 'Mapeia vulnerabilidades para os artigos da LGPD relacionados à segurança e proteção de dados pessoais.',
+    color: 'border-green-600/40',
+    tag: 'text-green-400',
+    badge: 'bg-green-900/30 text-green-400',
+    flag: '🇧🇷',
+  },
+  {
+    id: 'iso27001',
+    name: 'ISO 27001',
+    full: 'ISO/IEC 27001:2022 — Segurança da Informação',
+    desc: 'Mapeamento para controles do Annex A da ISO 27001:2022 — padrão internacional de segurança da informação.',
+    color: 'border-blue-600/40',
+    tag: 'text-blue-400',
+    badge: 'bg-blue-900/30 text-blue-400',
+    flag: '🌐',
+  },
+  {
+    id: 'pcidss',
+    name: 'PCI DSS 4.0',
+    full: 'Payment Card Industry Data Security Standard v4.0',
+    desc: 'Mapeamento para requisitos PCI DSS 4.0 — obrigatório para ambientes que processam cartões de pagamento.',
+    color: 'border-yellow-600/40',
+    tag: 'text-yellow-400',
+    badge: 'bg-yellow-900/30 text-yellow-400',
+    flag: '💳',
+  },
+]
 
 const TEMPLATES = [
   {
@@ -60,8 +93,11 @@ const FORMAT_INFO = {
 export default function Reporting() {
   const toast = useToast()
   const [reports, setReports] = useState([])
+  const [simulations, setSimulations] = useState([])
   const [loading, setLoading] = useState(true)
   const [generating, setGenerating] = useState(false)
+  const [complianceGen, setComplianceGen] = useState(null)
+  const [selectedSimId, setSelectedSimId] = useState('')
   const [formData, setFormData] = useState({
     template: 'Penetration Test Report',
     format: 'PDF',
@@ -72,6 +108,11 @@ export default function Reporting() {
 
   useEffect(() => {
     fetchReports()
+    api.get('/api/bas/simulations').then(r => {
+      const completed = (r.data.simulations || []).filter(s => s.status === 'completed')
+      setSimulations(completed)
+      if (completed.length > 0) setSelectedSimId(completed[0].id)
+    }).catch(() => {})
   }, [])
 
   const fetchReports = async () => {
@@ -107,13 +148,39 @@ export default function Reporting() {
     }
   }
 
-  const handleDownload = async (reportId) => {
+  const handleComplianceReport = async (framework) => {
+    setComplianceGen(framework)
     try {
-      const res = await api.get(`/api/reporting/reports/${reportId}/download`, { responseType: 'blob' })
+      const res = await api.post('/api/reporting/compliance', {
+        framework,
+        simulation_id: selectedSimId || undefined,
+      }, { responseType: 'blob' })
       const url = window.URL.createObjectURL(new Blob([res.data]))
       const link = document.createElement('a')
       link.href = url
-      link.setAttribute('download', `report-${reportId}.pdf`)
+      link.setAttribute('download', `compliance_${framework}.pdf`)
+      document.body.appendChild(link)
+      link.click()
+      link.parentNode.removeChild(link)
+      window.URL.revokeObjectURL(url)
+      toast(`Relatório ${framework.toUpperCase()} gerado!`, 'success')
+    } catch (err) {
+      toast('Erro ao gerar relatório de compliance: ' + (err.response?.data?.detail || err.message), 'error')
+    } finally {
+      setComplianceGen(null)
+    }
+  }
+
+  const handleDownload = async (report) => {
+    try {
+      const res = await api.get(`/api/reporting/reports/${report.id}/download`, { responseType: 'blob' })
+      const fmt = (report.format || 'pdf').toLowerCase()
+      const ext = fmt === 'word' || fmt === 'docx' ? 'docx' : fmt === 'excel' || fmt === 'xlsx' ? 'xlsx' : 'pdf'
+      const name = (report.title || `report-${report.id}`).replace(/[^a-z0-9_-]/gi, '_')
+      const url = window.URL.createObjectURL(new Blob([res.data]))
+      const link = document.createElement('a')
+      link.href = url
+      link.setAttribute('download', `${name}.${ext}`)
       document.body.appendChild(link)
       link.click()
       link.parentNode.removeChild(link)
@@ -242,6 +309,64 @@ export default function Reporting() {
         </div>
       </div>
 
+      {/* Relatórios de Compliance */}
+      <div className="card-dark p-6">
+        <div className="flex items-center gap-2 mb-2">
+          <Shield className="w-5 h-5 text-green-400" />
+          <h2 className="text-2xl font-bold text-gray-100">Relatórios de Compliance</h2>
+        </div>
+        <p className="text-gray-400 text-sm mb-5">
+          Gera PDFs que mapeiam automaticamente as vulnerabilidades encontradas nas simulações para os controles dos frameworks de compliance.
+        </p>
+
+        {simulations.length > 0 && (
+          <div className="mb-5">
+            <label className="block text-sm font-medium text-gray-300 mb-2">Simulação de referência</label>
+            <select
+              value={selectedSimId}
+              onChange={e => setSelectedSimId(e.target.value)}
+              className="select-dark"
+            >
+              {simulations.map(s => (
+                <option key={s.id} value={s.id}>
+                  {s.target} — {new Date(s.date).toLocaleDateString('pt-BR')} — Score: {s.score?.toFixed(1)}%
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {COMPLIANCE_FRAMEWORKS.map(fw => (
+            <div key={fw.id} className={`bg-dark-700 border-2 ${fw.color} rounded-lg p-5`}>
+              <div className="flex items-start justify-between mb-3">
+                <div>
+                  <span className="text-2xl mr-2">{fw.flag}</span>
+                  <span className={`font-black text-xl ${fw.tag}`}>{fw.name}</span>
+                </div>
+                <span className={`text-xs px-2 py-0.5 rounded font-medium ${fw.badge}`}>PDF</span>
+              </div>
+              <p className="text-xs text-gray-400 leading-relaxed mb-4">{fw.full}</p>
+              <p className="text-xs text-gray-500 mb-4">{fw.desc}</p>
+              <button
+                onClick={() => handleComplianceReport(fw.id)}
+                disabled={!!complianceGen || simulations.length === 0}
+                className={`w-full flex justify-center items-center gap-2 py-2 px-4 rounded text-sm font-medium transition disabled:opacity-50 ${fw.badge} border ${fw.color} hover:opacity-80`}
+              >
+                {complianceGen === fw.id ? (
+                  <><Loader className="w-4 h-4 animate-spin" /> Gerando...</>
+                ) : (
+                  <><CheckCircle className="w-4 h-4" /> Gerar {fw.name}</>
+                )}
+              </button>
+              {simulations.length === 0 && (
+                <p className="text-xs text-gray-600 mt-2 text-center">Execute uma simulação BAS primeiro</p>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+
       {/* Relatórios Gerados */}
       <div className="card-dark p-6">
         <h2 className="text-2xl font-bold text-gray-100 mb-5">Relatórios Gerados ({reports.length})</h2>
@@ -277,7 +402,7 @@ export default function Reporting() {
                       <td className="py-3 text-gray-300">{report.format}</td>
                       <td className="py-3 text-gray-400">{report.created_at ? new Date(report.created_at).toLocaleDateString('pt-BR') : '-'}</td>
                       <td className="py-3">
-                        <button onClick={() => handleDownload(report.id)} className="text-blue-400 hover:text-blue-300 transition flex items-center gap-1 text-xs">
+                        <button onClick={() => handleDownload(report)} className="text-blue-400 hover:text-blue-300 transition flex items-center gap-1 text-xs">
                           <Download className="w-4 h-4" />
                           Baixar
                         </button>

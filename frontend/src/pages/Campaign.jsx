@@ -53,14 +53,21 @@ export default function Campaign() {
   const [pastCampaigns, setPastCampaigns] = useState([])
   const [viewingPast, setViewingPast] = useState(null)
 
-  const [form, setForm] = useState({
-    target_host: 'localhost',
-    target_port: 9090,
-    duration_per_method: 30,
-    threads: 8,
-    pps: 200,
-    run_recon: true,
-    methods: ['http_flood', 'slowloris', 'udp_flood'],
+  const [form, setForm] = useState(() => {
+    try {
+      const env = JSON.parse(localStorage.getItem('penteia_env') || '{}')
+      return {
+        target_host: env.host || '',
+        target_port: env.port || '',
+        duration_per_method: 30,
+        threads: 8,
+        pps: 200,
+        run_recon: true,
+        methods: ['http_flood', 'slowloris', 'udp_flood'],
+      }
+    } catch {
+      return { target_host: '', target_port: '', duration_per_method: 30, threads: 8, pps: 200, run_recon: true, methods: ['http_flood', 'slowloris', 'udp_flood'] }
+    }
   })
 
   const fetchPast = useCallback(async () => {
@@ -83,15 +90,16 @@ export default function Campaign() {
     if (!form.target_host.trim()) { toast('Informe o host alvo', 'warning'); return }
     if (form.methods.length === 0) { toast('Selecione ao menos um método de ataque', 'warning'); return }
     try {
-      const r = await api.post('/api/campaign/start', {
-        target_host:        form.target_host.trim(),
-        target_port:        Number(form.target_port),
-        methods:            form.methods,
+      const payload = {
+        target_host:         form.target_host.trim(),
+        methods:             form.methods,
         duration_per_method: Number(form.duration_per_method),
-        threads:            Number(form.threads),
-        pps:                Number(form.pps),
-        run_recon:          form.run_recon,
-      })
+        threads:             Number(form.threads),
+        pps:                 Number(form.pps),
+        run_recon:           form.run_recon,
+      }
+      if (form.target_port !== '') payload.target_port = Number(form.target_port)
+      const r = await api.post('/api/campaign/start', payload)
       setCampaignId(r.data.campaign_id)
       setStep('running')
     } catch (e) {
@@ -172,9 +180,11 @@ export default function Campaign() {
                   placeholder="ex: localhost ou 192.168.1.1" />
               </div>
               <div>
-                <label className="block text-xs text-gray-400 mb-1">Porta</label>
+                <label className="block text-xs text-gray-400 mb-1">Porta <span className="text-gray-600">(opcional)</span></label>
                 <input className="input-dark w-full" type="number" value={form.target_port}
-                  onChange={e => setForm(f => ({ ...f, target_port: e.target.value }))} />
+                  onChange={e => setForm(f => ({ ...f, target_port: e.target.value }))}
+                  placeholder="Auto-detectar" />
+                <p className="text-xs text-gray-600 mt-1">Vazio = escaneia portas abertas</p>
               </div>
               <div>
                 <label className="block text-xs text-gray-400 mb-1">Duração por método (s)</label>
@@ -227,8 +237,8 @@ export default function Campaign() {
               <p className="text-sm text-gray-400 mt-4">
                 Tempo total estimado:
                 <strong className="text-gray-100 ml-1">
-                  ~{Math.ceil((form.methods.length * Number(form.duration_per_method) + (form.run_recon ? 15 : 0)) / 60)} min
-                  ({form.methods.length * Number(form.duration_per_method)}s de ataque)
+                  ~{Math.ceil((form.methods.length * Number(form.duration_per_method) + (form.run_recon ? 15 : 0) + (form.target_port === '' ? 10 : 0)) / 60)} min
+                  ({form.methods.length * Number(form.duration_per_method)}s de ataque{form.target_port === '' ? ' + ~10s port scan' : ''})
                 </strong>
               </p>
             )}
@@ -242,8 +252,16 @@ export default function Campaign() {
             <div className="space-y-3 text-sm">
               <div className="flex justify-between">
                 <span className="text-gray-400">Alvo</span>
-                <span className="text-gray-100 font-mono">{form.target_host}:{form.target_port}</span>
+                <span className="text-gray-100 font-mono">
+                  {form.target_host || '—'}{form.target_port !== '' ? `:${form.target_port}` : ''}
+                </span>
               </div>
+              {form.target_port === '' && (
+                <div className="flex justify-between">
+                  <span className="text-gray-400">Porta</span>
+                  <span className="text-yellow-400 text-xs">Auto-scan ({23} portas)</span>
+                </div>
+              )}
               <div className="flex justify-between">
                 <span className="text-gray-400">Métodos</span>
                 <span className="text-gray-100">{form.methods.length} selecionados</span>
@@ -264,6 +282,11 @@ export default function Campaign() {
               {form.run_recon && (
                 <div className="flex items-center gap-2 text-xs text-gray-400 mb-1">
                   <ChevronRight className="w-3 h-3 text-purple-400" /> Reconhecimento
+                </div>
+              )}
+              {form.target_port === '' && (
+                <div className="flex items-center gap-2 text-xs text-gray-400 mb-1">
+                  <ChevronRight className="w-3 h-3 text-yellow-400" /> Scan de portas (auto)
                 </div>
               )}
               {form.methods.map((id, i) => {
@@ -402,15 +425,29 @@ export default function Campaign() {
         )}
 
         {/* Recon parcial */}
-        {s?.recon?.baseline_ms && (
+        {s?.recon && Object.keys(s.recon).length > 0 && (
           <div className="card-dark p-4 text-sm">
             <h3 className="text-gray-400 mb-2 text-xs font-semibold uppercase tracking-wide">Reconhecimento</h3>
             <div className="grid grid-cols-2 gap-2 text-xs">
               <div><span className="text-gray-500">IP: </span><span className="text-gray-100 font-mono">{s.recon.resolved_ip || s.recon.host}</span></div>
               <div><span className="text-gray-500">Servidor: </span><span className="text-gray-100">{s.recon.server_header || 'n/d'}</span></div>
-              <div><span className="text-gray-500">Latência base: </span><span className="text-green-300">{s.recon.baseline_ms}ms</span></div>
-              <div><span className="text-gray-500">CSP ativo: </span><span className={s.recon.has_csp ? 'text-green-400' : 'text-red-400'}>{s.recon.has_csp ? 'Sim' : 'Não'}</span></div>
+              {s.recon.baseline_ms && (
+                <div><span className="text-gray-500">Latência base: </span><span className="text-green-300">{s.recon.baseline_ms}ms</span></div>
+              )}
+              {s.recon.port && (
+                <div><span className="text-gray-500">Porta atacada: </span><span className="text-red-300 font-mono">:{s.recon.port}</span></div>
+              )}
             </div>
+            {s.recon.open_ports?.length > 0 && (
+              <div className="mt-2">
+                <span className="text-gray-500 text-xs">Portas abertas: </span>
+                <span className="text-xs">
+                  {s.recon.open_ports.map(p => (
+                    <span key={p} className={`inline-block font-mono mr-1 px-1.5 py-0.5 rounded ${p === s.recon.port ? 'bg-red-900/50 text-red-400' : 'bg-dark-600 text-gray-300'}`}>:{p}</span>
+                  ))}
+                </span>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -454,12 +491,12 @@ export default function Campaign() {
         </div>
 
         {/* Recon */}
-        {rep.recon?.baseline_ms && (
+        {rep.recon && Object.keys(rep.recon).length > 0 && (
           <div className="card-dark p-6">
             <h2 className="text-xl font-bold text-gray-100 mb-4 flex items-center gap-2">
               <Wifi className="w-5 h-5 text-blue-400" /> Reconhecimento do Alvo
             </h2>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm mb-4">
               <div className="bg-dark-700 rounded p-3">
                 <p className="text-xs text-gray-500 mb-1">IP Resolvido</p>
                 <p className="font-mono text-gray-100">{rep.recon.resolved_ip || rep.recon.host}</p>
@@ -470,7 +507,7 @@ export default function Campaign() {
               </div>
               <div className="bg-dark-700 rounded p-3">
                 <p className="text-xs text-gray-500 mb-1">Latência base</p>
-                <p className="text-green-300 font-bold">{rep.recon.baseline_ms}ms</p>
+                <p className="text-green-300 font-bold">{rep.recon.baseline_ms ?? 'n/d'}ms</p>
               </div>
               <div className="bg-dark-700 rounded p-3">
                 <p className="text-xs text-gray-500 mb-1">Proteções HTTP</p>
@@ -487,6 +524,22 @@ export default function Campaign() {
                 </div>
               </div>
             </div>
+            {rep.recon.open_ports?.length > 0 && (
+              <div className="bg-dark-700 rounded p-4">
+                <p className="text-xs text-gray-500 mb-2">Portas abertas descobertas ({rep.recon.open_ports.length})</p>
+                <div className="flex flex-wrap gap-2">
+                  {rep.recon.open_ports.map(p => (
+                    <span key={p} className={`text-xs font-mono px-2 py-1 rounded border ${
+                      p === rep.recon.port
+                        ? 'bg-red-900/50 text-red-400 border-red-700/50'
+                        : 'bg-dark-600 text-gray-300 border-dark-500'
+                    }`}>
+                      :{p}{p === rep.recon.port ? ' ← atacada' : ''}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
 

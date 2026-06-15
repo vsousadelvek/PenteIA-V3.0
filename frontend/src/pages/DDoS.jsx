@@ -375,12 +375,19 @@ function SSHProxySection({ proxy, setProxy, onTest, onDiag }) {
 export default function DDoS() {
   const toast = useToast()
   const [targetMode, setTargetMode] = useState('ip')
-  const [form, setForm] = useState({
-    target_host: '127.0.0.1', target_ports: '80',
-    domain: '',
-    method: 'http_flood', duration: 30, pps: 500, threads: 8,
-    payload_size: 512, connections: 300,
-    endpoints: '',
+  const [form, setForm] = useState(() => {
+    try {
+      const env = JSON.parse(localStorage.getItem('penteia_env') || '{}')
+      return {
+        target_host: env.host || '', target_ports: env.port || '80',
+        domain: env.host || '',
+        method: 'http_flood', duration: 30, pps: 500, threads: 8,
+        payload_size: 512, connections: 300,
+        endpoints: '',
+      }
+    } catch {
+      return { target_host: '', target_ports: '80', domain: '', method: 'http_flood', duration: 30, pps: 500, threads: 8, payload_size: 512, connections: 300, endpoints: '' }
+    }
   })
   const [proxy, setProxy] = useState({
     use_ssh_proxy: false, use_local: false,
@@ -589,8 +596,67 @@ export default function DDoS() {
   return (
     <div className="space-y-8">
       <div className="slide-in">
-        <h1 className="text-4xl font-bold text-gray-100 mb-2">Teste DDoS</h1>
-        <p className="text-gray-400">Stress test de resiliência — 8 métodos, métricas em tempo real, multi-alvo simultâneo</p>
+        <h1 className="text-4xl font-bold text-gray-100 mb-2">Teste de Resistência (DDoS)</h1>
+        <p className="text-gray-400">Simula ataques de sobrecarga para descobrir se o servidor aguenta — com 8 métodos, métricas ao vivo e suporte a múltiplos atacantes</p>
+      </div>
+
+      {/* O que é e como usar */}
+      <div className="card-dark p-6 bg-blue-900/10 border-l-4 border-blue-600">
+        <div className="flex items-center gap-2 mb-3">
+          <Activity className="w-5 h-5 text-blue-400" />
+          <h2 className="text-lg font-bold text-gray-100">O que é um teste DDoS?</h2>
+        </div>
+        <p className="text-gray-300 text-sm mb-4 leading-relaxed">
+          Imagine tentar entrar numa loja com mil pessoas ao mesmo tempo — o servidor pode travar, ficar lento ou derrubar o site.
+          Este módulo faz exatamente isso de forma controlada, para descobrir o limite da sua infraestrutura <strong className="text-gray-100">antes que um atacante real descubra</strong>.
+        </p>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+          {[
+            { n: '1', t: 'Escolha o método', d: 'Cada método simula um tipo de ataque diferente. Para iniciantes, use "HTTP Flood" — é o mais comum e mais fácil de interpretar.' },
+            { n: '2', t: 'Configure o alvo', d: 'Informe o IP e porta do servidor que você tem autorização para testar. A duração padrão de 30s já é suficiente para observar o impacto.' },
+            { n: '3', t: 'Analise os resultados', d: 'Veja quantas requisições/pacotes chegaram ao servidor. Se ele travou ou retornou erros, a infraestrutura precisa de reforço.' },
+          ].map(({ n, t, d }) => (
+            <div key={n} className="flex gap-3 p-3 rounded bg-dark-700 border border-dark-600">
+              <span className="text-blue-400 font-black text-xl w-6 flex-shrink-0">{n}</span>
+              <div>
+                <div className="font-semibold text-gray-100 text-xs mb-1">{t}</div>
+                <div className="text-gray-400 text-xs leading-relaxed">{d}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Guia de modos de execução */}
+        <div className="mt-4 border-t border-dark-600 pt-4">
+          <p className="text-xs font-semibold text-gray-400 mb-2 uppercase tracking-wider">Qual modo de execução usar?</p>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-xs">
+            <div className="p-2.5 rounded bg-emerald-900/20 border border-emerald-800/30">
+              <p className="font-semibold text-emerald-300 mb-1">Executor Nativo (recomendado)</p>
+              <p className="text-gray-400">O ataque sai direto desta máquina. Mais simples, sem configuração extra. Ideal para testes internos.</p>
+            </div>
+            <div className="p-2.5 rounded bg-indigo-900/20 border border-indigo-800/30">
+              <p className="font-semibold text-indigo-300 mb-1">Proxy SSH (intermediário)</p>
+              <p className="text-gray-400">O tráfego passa por um VPS seu. O alvo vê o IP do VPS, não o seu. Bom para testes externos realistas.</p>
+            </div>
+            <div className="p-2.5 rounded bg-purple-900/20 border border-purple-800/30">
+              <p className="font-semibold text-purple-300 mb-1">Multi-VPS Pool (avançado)</p>
+              <p className="text-gray-400">Vários VPS atacam ao mesmo tempo de IPs diferentes. Simula um botnet real. Requer múltiplos servidores configurados.</p>
+            </div>
+          </div>
+        </div>
+
+        {/* Glossário de métricas */}
+        <div className="mt-3 border-t border-dark-600 pt-3">
+          <p className="text-xs font-semibold text-gray-400 mb-2 uppercase tracking-wider">O que significam as métricas?</p>
+          <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-gray-400">
+            <span><span className="text-blue-300 font-mono">pkts</span> — pacotes enviados (Layer 3/4)</span>
+            <span><span className="text-green-300 font-mono">hits</span> — requisições HTTP enviadas</span>
+            <span><span className="text-purple-300 font-mono">conn</span> — conexões abertas simultâneas</span>
+            <span><span className="text-yellow-300 font-mono">pps</span> — pacotes por segundo</span>
+            <span><span className="text-cyan-300 font-mono">rps</span> — requisições por segundo</span>
+            <span><span className="text-orange-300 font-mono">Mbps</span> — megabits por segundo gerados</span>
+          </div>
+        </div>
       </div>
 
       <div className="bg-red-900/30 border border-red-600/50 rounded-lg p-4 flex gap-3">
@@ -689,7 +755,7 @@ export default function DDoS() {
             <div className="grid grid-cols-2 gap-4">
               <div>
                 <label className="block text-sm font-medium text-gray-300 mb-2">
-                  {needsConnections ? 'Conexões' : 'Pkts/Reqs por segundo'}
+                  {needsConnections ? 'Conexões simultâneas' : 'Intensidade (req/pacotes por segundo)'}
                 </label>
                 {needsConnections ? (
                   <input type="number" value={form.connections}
@@ -700,12 +766,14 @@ export default function DDoS() {
                     onChange={e => setForm(f => ({ ...f, pps: parseInt(e.target.value) || 500 }))}
                     min="1" max="50000" className="input-dark w-full" />
                 )}
+                <p className="text-xs text-gray-500 mt-1">Iniciantes: use 200–500. Avançado: até 5000+</p>
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Threads</label>
+                <label className="block text-sm font-medium text-gray-300 mb-2">Threads (trabalhadores paralelos)</label>
                 <input type="number" value={form.threads}
                   onChange={e => setForm(f => ({ ...f, threads: parseInt(e.target.value) || 8 }))}
                   min="1" max="64" className="input-dark w-full" />
+                <p className="text-xs text-gray-500 mt-1">Mais threads = mais pressão. Padrão: 8</p>
               </div>
             </div>
 

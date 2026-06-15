@@ -90,15 +90,27 @@ if _HAS_APSCHEDULER:
 
 @app.on_event("startup")
 async def _startup():
-    """Re-register APScheduler jobs and create new DB tables on startup."""
+    """Re-register APScheduler jobs, create new DB tables, and clean orphan simulations."""
     from database import engine
     from models import Base
     Base.metadata.create_all(bind=engine)
 
-    if not _scheduler:
-        return
     db_startup = SessionLocal()
     try:
+        # Cleanup orphan simulations stuck in "running" for more than 2 hours
+        cutoff = datetime.utcnow() - timedelta(hours=2)
+        orphans = db_startup.query(Simulation).filter(
+            Simulation.status == "running",
+            Simulation.date < cutoff,
+        ).all()
+        for sim in orphans:
+            sim.status = "timeout"
+            sim.results = sim.results or {}
+        if orphans:
+            db_startup.commit()
+
+        if not _scheduler:
+            return
         enabled_scans = db_startup.query(ScheduledScan).filter(ScheduledScan.enabled == True).all()
         for scan in enabled_scans:
             days = _interval_days(scan.interval)
@@ -166,10 +178,18 @@ class CDNCheckRequest(BaseModel):
     domain: str
 
 class ReconResolveRequest(BaseModel):
-    domain: str
+    domain: Optional[str] = None
+    host: Optional[str] = None  # alias
+
+    def get_domain(self) -> str:
+        return (self.domain or self.host or "").strip()
 
 class ReconIPInfoRequest(BaseModel):
-    ip: str
+    ip: Optional[str] = None
+    host: Optional[str] = None  # alias
+
+    def get_ip(self) -> str:
+        return (self.ip or self.host or "").strip()
 
 class ReconScanRequest(BaseModel):
     host: str
@@ -314,12 +334,19 @@ async def register(req: RegisterRequest, db: Session = Depends(get_db)):
     existing = db.query(User).filter(User.username == req.username).first()
     if existing:
         raise HTTPException(status_code=400, detail="Usuário já existe")
-    user = User(username=req.username, email=req.email, password_hash=hash_password(req.password))
+    is_first = db.query(User).count() == 0
+    user = User(
+        username=req.username, email=req.email,
+        password_hash=hash_password(req.password),
+        role="admin" if is_first else "user",
+        is_admin=is_first,
+        credits=9999 if is_first else 100,
+    )
     db.add(user)
     db.commit()
     db.refresh(user)
     access_token = create_access_token(data={"sub": user.id})
-    return TokenResponse(access_token=access_token, token_type="bearer", username=user.username)
+    return TokenResponse(access_token=access_token, token_type="bearer", username=user.username, is_admin=user.is_admin)
 
 @app.post("/api/auth/login")
 async def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)):
@@ -341,8 +368,10 @@ async def get_me(current_user: User = Depends(get_current_user)):
         "username": current_user.username,
         "email": current_user.email,
         "is_admin": current_user.is_admin or False,
+        "role": current_user.role or ("admin" if current_user.is_admin else "user"),
         "credits": current_user.credits or 0,
         "status": current_user.status or "active",
+        "created_at": current_user.created_at.isoformat() if current_user.created_at else None,
     }
 
 
@@ -563,16 +592,53 @@ def _bas_run(sim_id: str, playbook_name: str, target: str, severity: str, num_te
     """Executa simulação BAS real contra o alvo."""
 
     # parse host:port
-    if ":" in target.split("/")[-1]:
+    if "://" in target:
+        base = target.rstrip("/")
+    elif ":" in target.split("/")[-1]:
         parts = target.rsplit(":", 1)
-        host, port = parts[0].lstrip("http://").lstrip("https://"), int(parts[1])
+        host_p = parts[0].lstrip("http://").lstrip("https://")
+        try:
+            port = int(parts[1])
+            base = f"http://{host_p}:{port}"
+        except ValueError:
+            base = f"http://{target}"
     else:
         host = target.lstrip("http://").lstrip("https://")
-        port = 80
-    base = f"http://{host}:{port}"
+        base = f"http://{host}"
+
+    # Quick reachability check before running full suite
+    try:
+        _ping = _requests.get(base + "/", timeout=5, allow_redirects=False)
+    except Exception:
+        _ping = None
 
     techniques = []
     hits = 0  # técnicas que encontraram fraqueza
+
+    # If target completely unreachable, mark as unreachable immediately
+    if _ping is None:
+        db_early = SessionLocal()
+        try:
+            sim = db_early.query(Simulation).filter(Simulation.id == sim_id).first()
+            if sim:
+                sim.status = "unreachable"
+                sim.score = 0.0
+                sim.results = {
+                    "techniques": [],
+                    "hits": 0,
+                    "total": 0,
+                    "target": target,
+                    "error": "Alvo inacessível — sem resposta HTTP no endereço fornecido. Verifique host:porta e protocolo.",
+                }
+                db_early.commit()
+        finally:
+            db_early.close()
+        _operation_logs.append({
+            "module": "BAS", "action": "Alvo inacessível",
+            "details": f"{playbook_name} → {target}",
+            "timestamp": datetime.utcnow().isoformat(),
+        })
+        return
 
     def probe(path="/", method="GET", data=None, headers=None, timeout=5):
         try:
@@ -969,6 +1035,29 @@ def _bas_run(sim_id: str, playbook_name: str, target: str, severity: str, num_te
             if sched:
                 sched.last_run = datetime.utcnow()
                 db2.commit()
+            # WebSocket broadcast e notificação de conclusão
+            try:
+                loop = asyncio.get_event_loop()
+                asyncio.run_coroutine_threadsafe(_ws_broadcast({
+                    "type": "simulation_update",
+                    "simulation_id": sim_id,
+                    "status": "completed",
+                    "score": score,
+                    "target": target,
+                    "timestamp": datetime.utcnow().isoformat(),
+                }), loop)
+                sev_label = "CRÍTICO" if score >= 70 else "ALTO" if score >= 40 else "MÉDIO" if score >= 20 else "BAIXO"
+                notif_type = "critical" if score >= 70 else "warning" if score >= 40 else "info"
+                _n = Notification(user_id=user_id, title=f"Simulação Concluída — Risco {sev_label}",
+                    message=f"{playbook_name} → {target} | Score: {score}% | {hits} técnicas exploráveis",
+                    type=notif_type)
+                db2.add(_n)
+                _audit_log = AuditLog(module="BAS", action="Simulação concluída",
+                    details=f"{playbook_name} → {target} | score={score}%", user_id=user_id)
+                db2.add(_audit_log)
+                db2.commit()
+            except Exception:
+                pass
     finally:
         db2.close()
 
@@ -996,6 +1085,8 @@ async def execute_playbook(
         daemon=True
     ).start()
     _operation_logs.append({"module": "BAS", "action": "Simulação iniciada", "details": f"{playbook.name} → {req.target}", "timestamp": datetime.utcnow().isoformat()})
+    _audit(db, "BAS", "Simulação iniciada", f"{playbook.name} → {req.target}", current_user.id)
+    _create_notification(db, current_user.id, "Simulação iniciada", f"BAS: {playbook.name} contra {req.target}", "info")
     return {"id": simulation.id, "status": "running", "message": "Simulação iniciada"}
 
 @app.get("/api/bas/simulations")
@@ -1983,6 +2074,7 @@ async def generate_report(
     db.add(report)
     db.commit()
     _operation_logs.append({"module": "SYSTEM", "action": "Relatório gerado", "details": req.title, "timestamp": generated_at})
+    _audit(db, "Reporting", "Relatório gerado", f"{req.title} ({req.report_type}/{req.format})", current_user.id)
     return {"id": report.id, "message": "Relatório gerado"}
 
 @app.get("/api/reporting/reports")
@@ -2045,26 +2137,121 @@ async def get_evasion_techniques(current_user: User = Depends(get_current_user))
             {
                 "id": "edr-evasion",
                 "name": "EDR Evasion",
-                "category": "Defense Evasion",
-                "techniques": ["ROP Gadget Chaining", "Indirect Syscalls", "Module Stomping", "Sandbox Detection"]
+                "category": "EDR Evasion",
+                "mitre_id": "T1562.001",
+                "platform": "windows",
+                "difficulty": "High",
+                "payload_template": "pe_injector",
+                "techniques": [
+                    "ROP Gadget Chaining — encadeia gadgets ROP para desviar fluxo sem chamar APIs monitoradas",
+                    "Indirect Syscalls — chama syscalls do kernel diretamente, evitando hooks do EDR em ntdll.dll",
+                    "Module Stomping — sobrescreve módulo legítimo em memória para mascarar shellcode",
+                    "Sandbox Detection — detecta ambiente de análise por latência de CPU/mouse/rede e para execução",
+                    "Heaven's Gate (32→64 bit) — alterna entre modo 32/64bit para escapar de hooks de userland",
+                    "Usermode API Unhooking — remove hooks do EDR restaurando bytes originais de ntdll.dll",
+                ]
             },
             {
                 "id": "memory-evasion",
                 "name": "Memory Evasion",
-                "category": "Defense Evasion",
-                "techniques": ["Sleep Obfuscation (Ekko)", "Thread Stack Spoofing", "APC Queue Abuse", "HeapEncrypt"]
+                "category": "Memory Evasion",
+                "mitre_id": "T1055",
+                "platform": "windows",
+                "difficulty": "High",
+                "payload_template": "reflective_loader",
+                "techniques": [
+                    "Sleep Obfuscation (Ekko) — cifra shellcode em memória durante sleeps para escapar de memory scans",
+                    "Thread Stack Spoofing — falsifica call stack da thread para ocultar origem do shellcode",
+                    "APC Queue Abuse — injeta shellcode via APC em thread alerta, sem criar thread nova",
+                    "HeapEncrypt — mantém payload cifrado no heap, decifra só no momento de execução",
+                    "Reflective DLL Loading — carrega DLL diretamente em memória sem chamar LoadLibrary/CreateFile",
+                    "PE-to-Shellcode — converte PE em shellcode PIC para execução posição-independente",
+                ]
             },
             {
                 "id": "telemetry-bypass",
                 "name": "Telemetry Bypass",
-                "category": "Defense Evasion",
-                "techniques": ["AMSI Bypass (Patchless)", "ETW Provider Disable", "Event Log Manipulation", "Sysmon Blind"]
+                "category": "Telemetry Bypass",
+                "mitre_id": "T1562.006",
+                "platform": "windows",
+                "difficulty": "Medium",
+                "payload_template": "dll_sideload",
+                "techniques": [
+                    "AMSI Bypass (Patchless) — corrompe AMSI via ponteiro de contexto sem patching em memória",
+                    "ETW Provider Disable — desabilita provedores ETW via NtTraceControl para cegar SIEM",
+                    "Event Log Manipulation — suspende serviço de log ou limpa canal Security/System via WevtAPI",
+                    "Sysmon Blind — sobrescreve região de memória do Sysmon para criar ponto cego em registry events",
+                    "WMI Subscription Abuse — usa WMI para persistência sem criar processos filhos visíveis",
+                    "PPL Bypass — contorna Protected Process Light para injetar em processos protegidos (antivírus)",
+                ]
             },
             {
                 "id": "process-injection",
                 "name": "Process Injection",
-                "category": "Defense Evasion",
-                "techniques": ["Classic DLL Injection", "Process Hollowing", "Early Bird APC", "Phantom DLL Hollowing"]
+                "category": "Process Injection",
+                "mitre_id": "T1055",
+                "platform": "windows",
+                "difficulty": "Medium",
+                "payload_template": "pe_injector",
+                "techniques": [
+                    "Classic DLL Injection — WriteProcessMemory + CreateRemoteThread no processo alvo",
+                    "Process Hollowing — substitui memória de processo legítimo suspenso (T1055.012)",
+                    "Early Bird APC — injeta via APC antes do thread principal executar, pre-EP",
+                    "Phantom DLL Hollowing — injeta em DLL mapeada mas ainda não carregada pelo loader",
+                    "Thread Hijacking — suspende thread existente, modifica CONTEXT.Rip, resume (T1055.003)",
+                    "Module Overloading — carrega DLL legítima em módulo já carregado para mascarar atividade",
+                ]
+            },
+            {
+                "id": "lolbin-evasion",
+                "name": "Living off the Land (LOLBins)",
+                "category": "LOLBin Evasion",
+                "mitre_id": "T1218",
+                "platform": "windows",
+                "difficulty": "Low",
+                "payload_template": "hta_runner",
+                "techniques": [
+                    "mshta.exe — executa HTA/VBScript via binário legítimo da Microsoft (T1218.005)",
+                    "regsvr32 squiblydoo — carrega COM scriptlet remoto sem toque em disco (T1218.010)",
+                    "certutil decode — usa certutil para decodificar e dropar payload codificado em base64",
+                    "msiexec /q — instala MSI malicioso silenciosamente via processo assinado Microsoft",
+                    "wscript/cscript — executa VBScript/JScript de payload inicial (T1059.005)",
+                    "forfiles /p — executa comando arbitrário via utilitário de busca de arquivos",
+                ]
+            },
+            {
+                "id": "initial-access-evasion",
+                "name": "Initial Access Evasion",
+                "category": "Initial Access Evasion",
+                "mitre_id": "T1566",
+                "platform": "all",
+                "difficulty": "Medium",
+                "payload_template": "vba_macro",
+                "techniques": [
+                    "VBA Stomping — remove código VBA de origem mantendo p-code compilado para evadir análise estática",
+                    "XLM Macro (Excel 4.0) — usa macros legadas do Excel 4.0, raramente detectadas por sandboxes",
+                    "LNK Dropper — arquivo de atalho (.lnk) com target malicioso distribuído via email/USB",
+                    "ISO/IMG Container — usa container de imagem de disco para bypassar Mark-of-the-Web (T1553.005)",
+                    "HTML Smuggling — monta payload no browser via JavaScript, evita inspeção de proxy",
+                    "PDF with JS — embute JavaScript em PDF para execução silenciosa no Adobe Reader",
+                ]
+            },
+            {
+                "id": "network-evasion",
+                "name": "Network & C2 Evasion",
+                "category": "Network Evasion",
+                "mitre_id": "T1573",
+                "platform": "all",
+                "difficulty": "High",
+                "payload_template": "rev_shell_stub",
+                "techniques": [
+                    "Domain Fronting — usa CDN (CloudFront/Akamai) para ocultar C2 atrás de domínio legítimo (T1090.004)",
+                    "DNS-over-HTTPS C2 — usa DoH para comunicação C2 indetectável por DPI clássico",
+                    "HTTPS Certificate Impersonation — usa cert TLS de marca conhecida (Microsoft, Google) para C2",
+                    "Jitter + Sleep — randomiza beacon interval (jitter %) para evadir análise de tráfego periódico",
+                    "Protocol Mimicry — encapsula C2 em protocolo legítimo (HTTP2, WebSocket, gRPC)",
+                    "Traffic Padding — adiciona dados aleatórios para frustrar fingerprinting de payload por tamanho",
+                ]
             },
         ]
     }
@@ -2414,12 +2601,16 @@ async def serverless_recon(req: ServerlessReconRequest, current_user: User = Dep
 # ── Recon ────────────────────────────────────────────────────────────────────
 
 @app.post("/api/recon/resolve")
-async def resolve_domain(req: ReconResolveRequest, current_user: User = Depends(get_current_user)):
+async def resolve_domain(req: ReconResolveRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    domain = req.get_domain()
+    if not domain:
+        raise HTTPException(status_code=422, detail="Campo 'domain' ou 'host' obrigatório")
     try:
-        result = resolver_dominio(req.domain)
-        _operation_logs.append({"module": "Recon", "action": "DNS resolve", "details": req.domain, "timestamp": datetime.utcnow().isoformat()})
+        result = resolver_dominio(domain)
+        _operation_logs.append({"module": "Recon", "action": "DNS resolve", "details": domain, "timestamp": datetime.utcnow().isoformat()})
+        _audit(db, "Recon", "DNS Resolve", domain, current_user.id)
         return {
-            "domain": req.domain,
+            "domain": domain,
             "host": result.get("host"),
             "ips": result.get("ips", []),
             "erro": result.get("erro"),
@@ -2459,6 +2650,11 @@ async def scan_ports(req: ReconScanRequest, current_user: User = Depends(get_cur
                                      "timestamp": datetime.utcnow().isoformat()})
 
     threading.Thread(target=_run, daemon=True).start()
+    db_scan = SessionLocal()
+    try:
+        _audit(db_scan, "Recon", "Port Scan iniciado", f"{req.host} portas {req.ports}", current_user.id)
+    finally:
+        db_scan.close()
     return {"task_id": task_id, "total": len(portas)}
 
 
@@ -2496,10 +2692,13 @@ async def scan_stream(task_id: str, current_user: User = Depends(get_current_use
 
 
 @app.post("/api/recon/ipinfo")
-async def ip_info(req: ReconIPInfoRequest, current_user: User = Depends(get_current_user)):
+async def ip_info(req: ReconIPInfoRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    target_ip = req.get_ip()
+    if not target_ip:
+        raise HTTPException(status_code=422, detail="Campo 'ip' ou 'host' obrigatório")
     def _fetch():
         r = _requests.get(
-            f"http://ip-api.com/json/{req.ip}",
+            f"http://ip-api.com/json/{target_ip}",
             params={"fields": "status,message,country,countryCode,regionName,city,isp,org,as,lat,lon,query"},
             timeout=10,
         )
@@ -2511,7 +2710,8 @@ async def ip_info(req: ReconIPInfoRequest, current_user: User = Depends(get_curr
         raise HTTPException(status_code=502, detail=f"Erro ao consultar IP: {e}")
     if data.get("status") != "success":
         raise HTTPException(status_code=404, detail=data.get("message", "IP não encontrado ou inválido"))
-    _operation_logs.append({"module": "Recon", "action": "IP Info", "details": req.ip, "timestamp": datetime.utcnow().isoformat()})
+    _operation_logs.append({"module": "Recon", "action": "IP Info", "details": target_ip, "timestamp": datetime.utcnow().isoformat()})
+    _audit(db, "Recon", "IP Info", target_ip, current_user.id)
     return data
 
 
@@ -2767,7 +2967,7 @@ def _recommendations(results: list, recon: dict) -> list:
         recs.append("Servidor nginx detectado: use worker_processes auto e ajuste worker_connections para melhor distribuicao de carga sob ataque.")
     return recs
 
-def _run_campaign(campaign_id: str, req: CampaignRequest):
+def _run_campaign(campaign_id: str, req: CampaignRequest, user_id: str = ""):
     state = _campaign_store[campaign_id]
     state["status"] = "running"
     results = []
@@ -2919,8 +3119,29 @@ def _run_campaign(campaign_id: str, req: CampaignRequest):
         "timestamp": datetime.utcnow().isoformat(),
     })
 
+    # Persist final campaign state to DB
+    if user_id:
+        db_c = SessionLocal()
+        try:
+            db_camp = db_c.query(Campaign).filter(Campaign.id == campaign_id).first()
+            if db_camp:
+                db_camp.status = state["status"]
+                db_camp.results = {
+                    "recon": state.get("recon", {}),
+                    "methods_results": state.get("results", []),
+                    "phase": state.get("phase", ""),
+                    "error": state.get("error", ""),
+                }
+                db_camp.report = state.get("report") or {}
+                db_camp.completed_at = datetime.utcnow()
+                db_c.commit()
+        except Exception:
+            pass
+        finally:
+            db_c.close()
+
 @app.post("/api/campaign/start")
-async def campaign_start(req: CampaignRequest, current_user: User = Depends(get_current_user)):
+async def campaign_start(req: CampaignRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     valid_methods = {"http_flood", "slowloris", "udp_flood", "syn_flood", "dns_amplification", "icmp_flood"}
     bad = [m for m in req.methods if m not in valid_methods]
     if bad:
@@ -2939,6 +3160,8 @@ async def campaign_start(req: CampaignRequest, current_user: User = Depends(get_
 
     campaign_id = f"camp_{int(time.time() * 1000)}_{os.urandom(3).hex()}"
     initial_target = f"{req.target_host}:{req.target_port}" if req.target_port else req.target_host
+    started_at = datetime.utcnow()
+
     _campaign_store[campaign_id] = {
         "id":          campaign_id,
         "status":      "starting",
@@ -2950,32 +3173,101 @@ async def campaign_start(req: CampaignRequest, current_user: User = Depends(get_
         "recon":       {},
         "report":      None,
         "live_probe":  None,
-        "started_at":  datetime.utcnow().isoformat(),
+        "user_id":     current_user.id,
+        "started_at":  started_at.isoformat(),
     }
 
-    threading.Thread(target=_run_campaign, args=(campaign_id, req), daemon=True).start()
+    # Persist to DB so campaigns survive restarts
+    db_camp = Campaign(
+        id=campaign_id,
+        user_id=current_user.id,
+        status="starting",
+        config={
+            "target_host": req.target_host,
+            "target_port": req.target_port,
+            "methods": req.methods,
+            "duration_per_method": req.duration_per_method,
+            "threads": req.threads,
+            "pps": req.pps,
+            "run_recon": req.run_recon,
+        },
+        results={},
+        report={},
+        started_at=started_at,
+    )
+    db.add(db_camp)
+    db.commit()
+    _audit(db, "Campaign", "Campanha iniciada", f"{initial_target} — {len(req.methods)} metodos", current_user.id)
+
+    threading.Thread(target=_run_campaign, args=(campaign_id, req, current_user.id), daemon=True).start()
     return {"campaign_id": campaign_id, "status": "starting", "methods": req.methods}
 
 @app.get("/api/campaign/status/{campaign_id}")
-async def campaign_status(campaign_id: str, current_user: User = Depends(get_current_user)):
+async def campaign_status(campaign_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # Live data from memory (running campaigns)
     c = _campaign_store.get(campaign_id)
-    if not c:
+    if c:
+        return c
+    # Historical data from DB
+    db_camp = db.query(Campaign).filter(
+        Campaign.id == campaign_id, Campaign.user_id == current_user.id
+    ).first()
+    if not db_camp:
         raise HTTPException(status_code=404, detail="Campanha nao encontrada")
-    return c
+    cfg = db_camp.config or {}
+    return {
+        "id": db_camp.id,
+        "status": db_camp.status,
+        "phase": "done" if db_camp.status in ("done", "error") else "unknown",
+        "phase_label": "Campanha concluida" if db_camp.status == "done" else db_camp.status,
+        "target": cfg.get("target_host", ""),
+        "methods": cfg.get("methods", []),
+        "results": (db_camp.results or {}).get("methods_results", []),
+        "recon": (db_camp.results or {}).get("recon", {}),
+        "report": db_camp.report or {},
+        "live_probe": None,
+        "started_at": db_camp.started_at.isoformat() if db_camp.started_at else None,
+        "completed_at": db_camp.completed_at.isoformat() if db_camp.completed_at else None,
+    }
 
 @app.get("/api/campaign/list")
-async def campaign_list(current_user: User = Depends(get_current_user)):
-    return {"campaigns": [
+async def campaign_list(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # Merge in-memory (live) campaigns with DB (historical) campaigns
+    in_memory_ids = set(_campaign_store.keys())
+    live = [
         {"id": v["id"], "target": v["target"], "status": v["status"],
-         "started_at": v["started_at"], "methods": v["methods"]}
+         "started_at": v["started_at"], "methods": v["methods"], "source": "live"}
         for v in _campaign_store.values()
-    ]}
+        if v.get("user_id") == current_user.id
+    ]
+    db_camps = db.query(Campaign).filter(Campaign.user_id == current_user.id).order_by(Campaign.started_at.desc()).all()
+    historical = [
+        {"id": c.id,
+         "target": (c.config or {}).get("target_host", ""),
+         "status": c.status,
+         "started_at": c.started_at.isoformat() if c.started_at else None,
+         "methods": (c.config or {}).get("methods", []),
+         "completed_at": c.completed_at.isoformat() if c.completed_at else None,
+         "source": "db"}
+        for c in db_camps if c.id not in in_memory_ids
+    ]
+    return {"campaigns": live + historical}
 
 @app.delete("/api/campaign/{campaign_id}")
-async def campaign_delete(campaign_id: str, current_user: User = Depends(get_current_user)):
-    if campaign_id not in _campaign_store:
+async def campaign_delete(campaign_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    removed = False
+    if campaign_id in _campaign_store:
+        del _campaign_store[campaign_id]
+        removed = True
+    db_camp = db.query(Campaign).filter(
+        Campaign.id == campaign_id, Campaign.user_id == current_user.id
+    ).first()
+    if db_camp:
+        db.delete(db_camp)
+        db.commit()
+        removed = True
+    if not removed:
         raise HTTPException(status_code=404, detail="Campanha nao encontrada")
-    del _campaign_store[campaign_id]
     return {"message": "Campanha removida"}
 
 
@@ -3991,16 +4283,35 @@ async def attck_matrix(
             tactic_map[tac_name] = []
         tid = tech.technique_id
         st_info = status_map.get(tid, {"status": "not_tested", "cvss": 0, "simulations": 0})
+        _SEV_CVSS_MX = {"critical": 9.0, "high": 7.5, "medium": 5.0, "low": 3.0}
+        _COMPLIANCE_MAP = {
+            "RECONNAISSANCE":       ["NIST SP 800-53 RA-5", "ISO 27001 A.12.6"],
+            "INITIAL_ACCESS":       ["OWASP A01:2021", "NIST SP 800-53 AC-17", "PCI-DSS 6.4.3"],
+            "EXECUTION":            ["NIST SP 800-53 SI-3", "ISO 27001 A.12.2", "CIS Control 2"],
+            "PERSISTENCE":          ["NIST SP 800-53 CM-7", "ISO 27001 A.12.5", "CIS Control 5"],
+            "PRIVILEGE_ESCALATION": ["NIST SP 800-53 AC-6", "ISO 27001 A.9.2", "CIS Control 5"],
+            "DEFENSE_EVASION":      ["NIST SP 800-53 SI-4", "ISO 27001 A.12.4", "CIS Control 8"],
+            "CREDENTIAL_ACCESS":    ["NIST SP 800-53 IA-5", "ISO 27001 A.9.4", "PCI-DSS 8.2.3"],
+            "DISCOVERY":            ["NIST SP 800-53 CA-7", "ISO 27001 A.12.6", "CIS Control 7"],
+            "LATERAL_MOVEMENT":     ["NIST SP 800-53 SC-7", "ISO 27001 A.13.1", "PCI-DSS 1.2"],
+            "COLLECTION":           ["NIST SP 800-53 SI-12", "ISO 27001 A.8.2", "LGPD Art.46"],
+            "COMMAND_AND_CONTROL":  ["NIST SP 800-53 SC-7", "ISO 27001 A.13.2", "CIS Control 13"],
+            "EXFILTRATION":         ["NIST SP 800-53 SC-8", "ISO 27001 A.13.2", "LGPD Art.48", "PCI-DSS 4.2"],
+            "IMPACT":               ["NIST SP 800-53 CP-9", "ISO 27001 A.17.1", "CIS Control 10"],
+            "RESOURCE_DEVELOPMENT": ["NIST SP 800-53 PM-16", "ISO 27001 A.6.1"],
+        }
+        tech_layman = _TECH_LAYMAN.get(tid, ("", "", ""))
+        compliance = _COMPLIANCE_MAP.get(tac_name, [])
         tactic_map[tac_name].append({
             "id": tid,
             "name": tech.name,
             "status": st_info["status"],
-            "cvss": st_info["cvss"],
+            "cvss": st_info["cvss"] or _SEV_CVSS_MX.get(tech.severity.lower() if tech.severity else "", 0),
             "simulations": st_info["simulations"],
             "description": tech.description,
             "severity": tech.severity,
-            "compliance": [],
-            "remediation": "",
+            "compliance": compliance,
+            "remediation": tech_layman[2] if tech_layman else "",
         })
 
     tactic_list = []
@@ -4039,6 +4350,7 @@ async def vuln_db(
     severity: Optional[str] = None,
     status: Optional[str] = None,
     days: Optional[int] = None,
+    dedupe: bool = False,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -4090,6 +4402,17 @@ async def vuln_db(
     sev_order = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "": 4}
     vulns.sort(key=lambda v: (sev_order.get(v["severity"], 4), -v["cvss"]))
 
+    # Deduplication: keep latest per (technique_id, target, status)
+    if dedupe:
+        seen_keys: set = set()
+        deduped = []
+        for v in vulns:
+            key = (v["technique_id"], v["target"], v["status"])
+            if key not in seen_keys:
+                seen_keys.add(key)
+                deduped.append(v)
+        vulns = deduped
+
     stats = {
         "total": len(vulns),
         "critical": sum(1 for v in vulns if v["severity"] == "Critical"),
@@ -4097,6 +4420,9 @@ async def vuln_db(
         "medium": sum(1 for v in vulns if v["severity"] == "Medium"),
         "low": sum(1 for v in vulns if v["severity"] == "Low"),
         "unique_techniques": len({v["technique_id"] for v in vulns}),
+        "unique_targets": len({v["target"] for v in vulns}),
+        "found": sum(1 for v in vulns if v["status"] == "found"),
+        "blocked": sum(1 for v in vulns if v["status"] == "blocked"),
     }
     return {"vulns": vulns, "stats": stats}
 
@@ -4104,19 +4430,35 @@ async def vuln_db(
 @app.get("/api/bas/vulndb/export")
 async def vuln_db_export(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     import csv, io as _io
+    from bas_engine import ALL_TECHNIQUES
+    _SEV_NORM = {"critical": "Critical", "high": "High", "medium": "Medium", "low": "Low"}
+    _SEV_CVSS = {"Critical": 9.0, "High": 7.5, "Medium": 5.0, "Low": 3.0}
+    _TECH_META = {t.technique_id: t for t in ALL_TECHNIQUES}
     sims = db.query(Simulation).filter(
         Simulation.user_id == current_user.id, Simulation.status == "completed"
-    ).all()
+    ).order_by(Simulation.date.desc()).all()
     buf = _io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["Technique ID", "Name", "Severity", "CVSS", "Status", "Target", "Simulation ID", "Date", "Compliance", "Remediation"])
+    writer.writerow([
+        "Technique ID", "Name", "Tactic", "Severity", "CVSS", "Status",
+        "Target", "Simulation ID", "Date", "Compliance", "Remediation", "Detail",
+    ])
     for sim in sims:
         for t in (sim.results or {}).get("techniques", []):
+            tid = t.get("id", "")
+            meta = _TECH_META.get(tid)
+            sev_raw = t.get("severity", "") or (meta.severity if meta else "")
+            sev = _SEV_NORM.get(sev_raw.lower(), sev_raw)
+            cvss = t.get("cvss") or _SEV_CVSS.get(sev, 0)
+            tactic = meta.tactic.name.replace("_", " ").title() if meta else ""
+            tech_info = _TECH_LAYMAN.get(tid, ("", "", ""))
+            compliance = ";".join(t.get("compliance", []))
+            remediation = t.get("remediation", "") or tech_info[2]
             writer.writerow([
-                t.get("id", ""), t.get("name", ""), t.get("severity", ""),
-                t.get("cvss", 0), t.get("status", ""), sim.target, sim.id,
-                sim.date.strftime("%Y-%m-%d %H:%M"), ";".join(t.get("compliance", [])),
-                t.get("remediation", "")
+                tid, t.get("name", "") or (meta.name if meta else tid),
+                tactic, sev, cvss, t.get("status", ""),
+                sim.target, sim.id, sim.date.strftime("%Y-%m-%d %H:%M"),
+                compliance, remediation, t.get("detail", ""),
             ])
     buf.seek(0)
     return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv",
@@ -4180,21 +4522,63 @@ def _bas_run_retest(retest_id: str, original_id: str, playbook_name: str, target
             retest_vulns = {t["id"] for t in retest.results.get("techniques", []) if t.get("status") == "found"}
             remediated = orig_vulns - retest_vulns
             new_vulns = retest_vulns - orig_vulns
+            improvement = round(original.score - retest.score, 1)
             retest_results = dict(retest.results)
             retest_results["retest_comparison"] = {
                 "original_id": original_id,
                 "original_score": original.score,
                 "retest_score": retest.score,
-                "improvement": round(retest.score - original.score, 1),
+                "score_change": round(retest.score - original.score, 1),
+                "improvement": improvement,
                 "remediated_count": len(remediated),
                 "remediated_techniques": list(remediated),
                 "new_vulns_count": len(new_vulns),
                 "new_vuln_techniques": list(new_vulns),
+                "persisted_count": len(orig_vulns & retest_vulns),
+                "persisted_techniques": list(orig_vulns & retest_vulns),
             }
             retest.results = retest_results
             db_r.commit()
+            # Notification for retest completion
+            try:
+                status_msg = f"✅ {len(remediated)} remediadas, ⚠️ {len(new_vulns)} novas, score: {original.score:.1f}% → {retest.score:.1f}%"
+                notif_type = "success" if improvement > 0 else "warning"
+                _n = Notification(user_id=retest.user_id,
+                    title="Retest Concluído", message=f"{playbook_name} → {target} | {status_msg}",
+                    type=notif_type)
+                db_r.add(_n)
+                db_r.commit()
+                loop = asyncio.get_event_loop()
+                asyncio.run_coroutine_threadsafe(_ws_broadcast({
+                    "type": "retest_complete",
+                    "retest_id": retest_id, "original_id": original_id,
+                    "improvement": improvement, "remediated": len(remediated),
+                    "timestamp": datetime.utcnow().isoformat(),
+                }), loop)
+            except Exception:
+                pass
     finally:
         db_r.close()
+
+
+@app.get("/api/bas/retest/{retest_id}/comparison")
+async def get_retest_comparison(
+    retest_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return before/after comparison for a completed retest simulation."""
+    sim = db.query(Simulation).filter(
+        Simulation.id == retest_id, Simulation.user_id == current_user.id
+    ).first()
+    if not sim:
+        raise HTTPException(status_code=404, detail="Simulação de retest não encontrada")
+    if sim.status == "running":
+        return {"status": "running", "message": "Retest ainda em andamento"}
+    comparison = (sim.results or {}).get("retest_comparison")
+    if not comparison:
+        raise HTTPException(status_code=404, detail="Dados de comparação não disponíveis")
+    return {"status": "completed", "comparison": comparison, "retest_score": sim.score}
 
 
 # ── Payload Generator ─────────────────────────────────────────────────────────
@@ -4254,6 +4638,7 @@ async def payload_generate(
     _operation_logs.append({"module": "Evasion", "action": "Payload gerado",
         "details": f"{req.payload_type} ({req.encoder}/{req.output_format})",
         "timestamp": datetime.utcnow().isoformat()})
+    _audit(db, "Evasion", "Payload gerado", f"{req.payload_type} encoder={req.encoder} format={req.output_format}", current_user.id)
     return {**result, "saved_payload_id": payload_rec.id}
 
 
@@ -4301,6 +4686,21 @@ async def cloud_recon_start(
             rec.status = "done"
             rec.completed_at = datetime.utcnow()
             db2.commit()
+            # WebSocket broadcast: cloud recon completed
+            try:
+                loop = asyncio.get_event_loop()
+                asyncio.run_coroutine_threadsafe(_ws_broadcast({
+                    "type": "cloud_recon_complete",
+                    "id": rec.id, "host": rec.host,
+                    "cloud_provider": rec.cloud_provider,
+                    "timestamp": datetime.utcnow().isoformat(),
+                }), loop)
+                # Persist notification
+                _n = Notification(user_id=rec.user_id, title="Cloud Recon Concluído",
+                    message=f"{rec.host} — {rec.cloud_provider}", type="success")
+                db2.add(_n); db2.commit()
+            except Exception:
+                pass
         except Exception as e:
             try:
                 rec.status = "error"
@@ -4314,6 +4714,7 @@ async def cloud_recon_start(
     threading.Thread(target=_run, args=(record.id, req.host, record.company_name, req.extra_words), daemon=True).start()
     _operation_logs.append({"module": "Recon", "action": "Cloud Recon",
         "details": req.host, "timestamp": datetime.utcnow().isoformat()})
+    _audit(db, "Cloud", "Cloud Recon iniciado", req.host, current_user.id)
     return {"id": record.id, "status": "running", "message": "Cloud recon iniciado"}
 
 

@@ -181,12 +181,66 @@ Console.WriteLine("[PenteIA] Payload decoded: " + Encoding.UTF8.GetString(decode
 '''
 
 PAYLOAD_TEMPLATES = [
-    {"id": "test_eicar", "name": "EICAR-style Test String", "description": "Inert test payload for AV/EDR validation", "size_hint": "56B"},
-    {"id": "rev_shell_stub", "name": "Reverse Shell Stub (Python)", "description": "Python reverse shell test artifact (inert)", "size_hint": "~200B"},
-    {"id": "meterpreter_stub", "name": "Meterpreter Stub Template", "description": "Shellcode loader stub (no real shellcode)", "size_hint": "~512B"},
-    {"id": "vba_macro", "name": "VBA Macro Stub", "description": "Office macro template for phishing simulation", "size_hint": "~1KB"},
-    {"id": "ps1_dropper", "name": "PowerShell Dropper", "description": "PS1 dropper template for endpoint testing", "size_hint": "~800B"},
-    {"id": "pe_injector", "name": "PE Injector Stub", "description": "Process injection test artifact", "size_hint": "~2KB"},
+    {
+        "id": "shellcode_loader", "name": "Shellcode Loader",
+        "description": "Inert shellcode loader stub — testa detecção de carregamento dinâmico de shellcode em memória",
+        "category": "execution", "platform": "windows", "size_hint": "~54B",
+        "encoders": ["xor", "aes", "b64_multi"], "formats": ["powershell", "csharp", "python"],
+    },
+    {
+        "id": "test_eicar", "name": "EICAR-style Test String",
+        "description": "Payload de teste inerte — valida se AV/EDR detecta string de teste padrão",
+        "category": "av_test", "platform": "all", "size_hint": "56B",
+        "encoders": ["xor", "b64_multi", "none"], "formats": ["raw", "base64", "hex"],
+    },
+    {
+        "id": "ps1_dropper", "name": "PowerShell Dropper",
+        "description": "Template de dropper PS1 para testes de endpoint — verifica detecção de download+exec via AMSI",
+        "category": "execution", "platform": "windows", "size_hint": "~800B",
+        "encoders": ["xor", "aes", "b64_multi"], "formats": ["powershell"],
+    },
+    {
+        "id": "rev_shell_stub", "name": "Reverse Shell Stub (Python)",
+        "description": "Artefato de teste de reverse shell Python — valida detecção de socket reverso por EDR/network IDS",
+        "category": "c2", "platform": "linux", "size_hint": "~200B",
+        "encoders": ["xor", "b64_multi"], "formats": ["python"],
+    },
+    {
+        "id": "vba_macro", "name": "VBA Macro Stub",
+        "description": "Template de macro Office para simulação de phishing — testa sandbox e detecção de macros maliciosas",
+        "category": "initial_access", "platform": "windows", "size_hint": "~1KB",
+        "encoders": ["xor", "b64_multi"], "formats": ["raw", "base64"],
+    },
+    {
+        "id": "pe_injector", "name": "PE Injector Stub",
+        "description": "Artefato de injeção de processo — testa detecção de process hollowing / injection por EDR",
+        "category": "defense_evasion", "platform": "windows", "size_hint": "~2KB",
+        "encoders": ["xor", "aes"], "formats": ["csharp", "powershell"],
+    },
+    {
+        "id": "dll_sideload", "name": "DLL Side-Loading Stub",
+        "description": "Template de DLL para side-loading — valida detecção de DLL plantada em diretório de aplicação legítima",
+        "category": "defense_evasion", "platform": "windows", "size_hint": "~4KB",
+        "encoders": ["xor", "aes"], "formats": ["csharp"],
+    },
+    {
+        "id": "hta_runner", "name": "HTA Runner",
+        "description": "Template HTA (HTML Application) para testes de phishing via mshta.exe",
+        "category": "initial_access", "platform": "windows", "size_hint": "~500B",
+        "encoders": ["b64_multi", "xor"], "formats": ["raw", "base64"],
+    },
+    {
+        "id": "lnk_dropper", "name": "LNK Dropper Stub",
+        "description": "Artefato de atalho .LNK para simulação de distribuição via email/USB",
+        "category": "initial_access", "platform": "windows", "size_hint": "~300B",
+        "encoders": ["none", "b64_multi"], "formats": ["raw"],
+    },
+    {
+        "id": "reflective_loader", "name": "Reflective DLL Loader",
+        "description": "Stub de loader reflexivo — testa detecção de carregamento de DLL sem tocar disco (fileless)",
+        "category": "defense_evasion", "platform": "windows", "size_hint": "~8KB",
+        "encoders": ["xor", "aes", "b64_multi"], "formats": ["powershell", "csharp"],
+    },
 ]
 
 def get_templates() -> list:

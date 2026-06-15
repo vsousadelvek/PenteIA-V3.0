@@ -539,6 +539,63 @@ export default function BAS() {
                     </div>
                   )}
 
+                  {/* Painel de comparação pós-retest */}
+                  {sim.results?.retest_comparison && (() => {
+                    const cmp = sim.results.retest_comparison
+                    const improved = cmp.score_change <= 0
+                    return (
+                      <div className={`mx-4 my-3 p-4 rounded-lg border ${improved ? 'bg-green-950/30 border-green-700/40' : 'bg-red-950/30 border-red-700/40'}`}>
+                        <div className="flex items-center gap-2 mb-3">
+                          <span className={`text-sm font-bold ${improved ? 'text-green-400' : 'text-red-400'}`}>
+                            {improved ? '✅ Retest — Melhora detectada' : '⚠️ Retest — Vulnerabilidades persistem'}
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center text-xs mb-3">
+                          <div className="bg-dark-700/60 rounded p-2">
+                            <p className="text-gray-400">Score anterior</p>
+                            <p className="text-red-400 font-bold text-lg">{cmp.original_score?.toFixed(1)}%</p>
+                          </div>
+                          <div className="bg-dark-700/60 rounded p-2">
+                            <p className="text-gray-400">Score retest</p>
+                            <p className={`font-bold text-lg ${improved ? 'text-green-400' : 'text-red-400'}`}>{cmp.retest_score?.toFixed(1)}%</p>
+                          </div>
+                          <div className="bg-dark-700/60 rounded p-2">
+                            <p className="text-gray-400">Remediadas</p>
+                            <p className="text-green-400 font-bold text-lg">{cmp.remediated_count ?? 0}</p>
+                          </div>
+                          <div className="bg-dark-700/60 rounded p-2">
+                            <p className="text-gray-400">Novas vulns</p>
+                            <p className={`font-bold text-lg ${(cmp.new_vulns_count ?? 0) > 0 ? 'text-red-400' : 'text-gray-400'}`}>{cmp.new_vulns_count ?? 0}</p>
+                          </div>
+                        </div>
+                        {cmp.remediated_techniques?.length > 0 && (
+                          <details className="mb-2">
+                            <summary className="cursor-pointer text-xs text-green-400 hover:text-green-300">
+                              {cmp.remediated_techniques.length} técnica(s) remediada(s) — expandir
+                            </summary>
+                            <div className="mt-2 flex flex-wrap gap-1">
+                              {cmp.remediated_techniques.map(id => (
+                                <span key={id} className="text-[10px] px-1.5 py-0.5 bg-green-900/30 text-green-400 border border-green-800/30 rounded font-mono">{id}</span>
+                              ))}
+                            </div>
+                          </details>
+                        )}
+                        {cmp.new_vuln_techniques?.length > 0 && (
+                          <details>
+                            <summary className="cursor-pointer text-xs text-red-400 hover:text-red-300">
+                              {cmp.new_vuln_techniques.length} nova(s) vulnerabilidade(s) — expandir
+                            </summary>
+                            <div className="mt-2 flex flex-wrap gap-1">
+                              {cmp.new_vuln_techniques.map(id => (
+                                <span key={id} className="text-[10px] px-1.5 py-0.5 bg-red-900/30 text-red-400 border border-red-800/30 rounded font-mono">{id}</span>
+                              ))}
+                            </div>
+                          </details>
+                        )}
+                      </div>
+                    )
+                  })()}
+
                   {/* Técnicas */}
                   {filtered.length > 0 && (
                     <div className="divide-y divide-dark-600/50">

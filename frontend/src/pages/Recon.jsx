@@ -5,8 +5,8 @@ import api from '../api'
 
 export default function Recon() {
   const toast = useToast()
-  const [resolveTarget, setResolveTarget] = useState('localhost')
-  const [scanTarget, setScanTarget] = useState('localhost')
+  const [resolveTarget, setResolveTarget] = useState(() => { try { return JSON.parse(localStorage.getItem('penteia_env') || '{}').host || '' } catch { return '' } })
+  const [scanTarget, setScanTarget] = useState(() => { try { return JSON.parse(localStorage.getItem('penteia_env') || '{}').host || '' } catch { return '' } })
   const [scanPorts, setScanPorts] = useState('top')
   const [scanTimeout, setScanTimeout] = useState(1.0)
   const [scanWorkers, setScanWorkers] = useState(50)

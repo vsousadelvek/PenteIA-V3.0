@@ -9,24 +9,49 @@ const CATEGORY_INFO = {
     desc: 'Testa se o sistema de detecção avançada (EDR) consegue identificar técnicas usadas por atacantes reais para burlar proteções.',
     color: 'text-red-400',
     border: 'border-red-600/30',
+    bg: 'bg-red-900/10',
   },
   'Memory Evasion': {
     label: 'Evasão em Memória',
     desc: 'Verifica se ataques que residem apenas na memória do computador (sem criar arquivos) são detectados pelo antivírus.',
     color: 'text-orange-400',
     border: 'border-orange-600/30',
+    bg: 'bg-orange-900/10',
   },
   'Telemetry Bypass': {
     label: 'Bypass de Telemetria',
     desc: 'Testa técnicas para desabilitar os mecanismos de monitoramento do Windows como AMSI, ETW e Sysmon.',
     color: 'text-yellow-400',
     border: 'border-yellow-600/30',
+    bg: 'bg-yellow-900/10',
   },
   'Process Injection': {
     label: 'Injeção em Processos',
     desc: 'Simula ataques que se escondem dentro de processos legítimos do sistema operacional para evitar detecção.',
     color: 'text-purple-400',
     border: 'border-purple-600/30',
+    bg: 'bg-purple-900/10',
+  },
+  'LOLBin Evasion': {
+    label: 'Living off the Land',
+    desc: 'Usa binários legítimos do Windows (LOLBins) para executar código malicioso sem baixar ferramentas externas.',
+    color: 'text-cyan-400',
+    border: 'border-cyan-600/30',
+    bg: 'bg-cyan-900/10',
+  },
+  'Initial Access Evasion': {
+    label: 'Evasão de Acesso Inicial',
+    desc: 'Técnicas de phishing e entrega de payload que contornam sandboxes, antivírus e filtros de email.',
+    color: 'text-pink-400',
+    border: 'border-pink-600/30',
+    bg: 'bg-pink-900/10',
+  },
+  'Network Evasion': {
+    label: 'Evasão de Rede & C2',
+    desc: 'Técnicas para ocultar comunicação C2 de soluções de inspeção de tráfego, proxies e firewalls.',
+    color: 'text-blue-400',
+    border: 'border-blue-600/30',
+    bg: 'bg-blue-900/10',
   },
 }
 
@@ -250,8 +275,8 @@ export default function Evasion() {
           e quais passam despercebidas. Se uma técnica <strong>não</strong> é detectada, isso indica uma falha nas defesas que precisa ser corrigida.
         </p>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          {Object.values(CATEGORY_INFO).map(({ label, color }) => (
-            <div key={label} className="text-center p-2 rounded bg-dark-700 border border-dark-600">
+          {Object.values(CATEGORY_INFO).map(({ label, color, border }) => (
+            <div key={label} className={`text-center p-2 rounded bg-dark-700 border ${border || 'border-dark-600'}`}>
               <Shield className={`w-5 h-5 ${color} mx-auto mb-1`} />
               <span className="text-xs text-gray-300">{label}</span>
             </div>
@@ -276,28 +301,39 @@ export default function Evasion() {
         ) : techniques.length === 0 ? (
           <p className="text-gray-500 text-sm">Nenhuma técnica disponível no momento.</p>
         ) : (
-          <div className="space-y-4">
+          <div className="space-y-3">
             {techniques.map(tech => {
               const catInfo = getCategoryInfo(tech.category)
               const isExpanded = expandedTech === tech.id
+              const diffColor = tech.difficulty === 'High' ? 'text-red-400 bg-red-900/20 border-red-800/30'
+                : tech.difficulty === 'Medium' ? 'text-yellow-400 bg-yellow-900/20 border-yellow-800/30'
+                : 'text-green-400 bg-green-900/20 border-green-800/30'
               return (
-                <div key={tech.id} className={`bg-dark-700 border rounded-lg overflow-hidden transition ${catInfo.border}`}>
+                <div key={tech.id} className={`border rounded-lg overflow-hidden transition ${catInfo.border} ${catInfo.bg || 'bg-dark-700'}`}>
                   <button
                     onClick={() => setExpandedTech(isExpanded ? null : tech.id)}
-                    className="w-full p-4 text-left hover:bg-dark-600/50 transition"
+                    className="w-full p-4 text-left hover:bg-dark-600/30 transition"
                   >
                     <div className="flex justify-between items-start">
                       <div className="flex-1">
-                        <div className="flex items-center gap-3 mb-1">
+                        <div className="flex flex-wrap items-center gap-2 mb-1">
                           <h3 className="font-bold text-gray-100">{tech.name}</h3>
-                          <span className="badge-green text-xs">Pronto</span>
+                          {tech.mitre_id && (
+                            <span className="text-[10px] px-1.5 py-0.5 bg-dark-700 text-gray-400 border border-dark-600 rounded font-mono">{tech.mitre_id}</span>
+                          )}
+                          {tech.difficulty && (
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded border ${diffColor}`}>{tech.difficulty}</span>
+                          )}
+                          {tech.platform && (
+                            <span className="text-[10px] px-1.5 py-0.5 bg-dark-700 text-gray-500 rounded">{tech.platform}</span>
+                          )}
                         </div>
                         <p className={`text-xs font-semibold ${catInfo.color}`}>{catInfo.label || tech.category}</p>
                         {catInfo.desc && (
                           <p className="text-xs text-gray-400 mt-1 leading-relaxed">{catInfo.desc}</p>
                         )}
                       </div>
-                      <div className="flex items-center gap-2 ml-4">
+                      <div className="flex items-center gap-2 ml-4 flex-shrink-0">
                         {tech.techniques?.length > 0 && (
                           <span className="text-xs text-gray-500">{tech.techniques.length} técnicas</span>
                         )}
@@ -311,22 +347,28 @@ export default function Evasion() {
                   </button>
 
                   {isExpanded && tech.techniques?.length > 0 && (
-                    <div className="px-4 pb-4 border-t border-dark-600 pt-3">
-                      <p className="text-xs text-gray-500 mb-2">Técnicas específicas nesta categoria:</p>
-                      <div className="space-y-2">
-                        {tech.techniques.map((t, i) => (
-                          <div key={i} className="flex items-start gap-2 text-xs p-2 rounded bg-dark-800 border border-dark-700">
-                            <span className="w-2 h-2 rounded-full bg-purple-500 mt-1 flex-shrink-0" />
-                            <div>
-                              <span className="text-gray-200 font-medium">{t}</span>
+                    <div className="px-4 pb-4 border-t border-dark-600/50 pt-3">
+                      <p className="text-xs text-gray-500 mb-3">Técnicas específicas nesta categoria:</p>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                        {tech.techniques.map((t, i) => {
+                          const [name, ...descParts] = t.split(' — ')
+                          const desc = descParts.join(' — ')
+                          return (
+                            <div key={i} className="flex items-start gap-2 text-xs p-2.5 rounded bg-dark-800/80 border border-dark-700">
+                              <span className={`w-2 h-2 rounded-full mt-1 flex-shrink-0 ${catInfo.color.replace('text-', 'bg-')}`} />
+                              <div>
+                                <span className="text-gray-100 font-semibold">{name}</span>
+                                {desc && <p className="text-gray-500 mt-0.5 leading-relaxed">{desc}</p>}
+                              </div>
                             </div>
-                          </div>
-                        ))}
+                          )
+                        })}
                       </div>
-                      <div className="mt-3 p-2 rounded bg-blue-900/20 border border-blue-700/30">
-                        <p className="text-xs text-blue-300 flex gap-2">
-                          <Info className="w-3 h-3 flex-shrink-0 mt-0.5" />
-                          <span>Estas técnicas são executadas automaticamente quando você inicia uma simulação BAS com foco em evasão.</span>
+                      <div className="mt-3 p-2 rounded bg-blue-900/20 border border-blue-700/30 flex gap-2">
+                        <Info className="w-3 h-3 text-blue-400 flex-shrink-0 mt-0.5" />
+                        <p className="text-xs text-blue-300">
+                          Técnicas executadas automaticamente em simulações BAS com foco em evasão.
+                          {tech.payload_template && <span className="ml-1">Template sugerido: <span className="font-mono text-blue-200">{tech.payload_template}</span></span>}
                         </p>
                       </div>
                     </div>

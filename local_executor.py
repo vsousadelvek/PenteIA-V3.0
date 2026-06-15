@@ -42,8 +42,16 @@ def _ssl_ctx():
 class LocalFloodExecutor:
     """Flood local via asyncio — gratuito, nativo, sem VPS."""
 
+    def __init__(self):
+        self._stop_event = threading.Event()
+
+    def stop(self):
+        """Sinaliza parada — todos os runners verificam este evento."""
+        self._stop_event.set()
+
     def start_test(self, target_host: str, target_port: int, method: str,
                    duration: int, pps: int, threads: int, endpoints: str = '') -> tuple:
+        self._stop_event.clear()
 
         # pré-check de porta
         try:
@@ -102,7 +110,7 @@ class LocalFloodExecutor:
         async def worker(idx):
             end = asyncio.get_event_loop().time() + dur
             i = idx
-            while asyncio.get_event_loop().time() < end:
+            while asyncio.get_event_loop().time() < end and not self._stop_event.is_set():
                 try:
                     r, w = await asyncio.wait_for(
                         asyncio.open_connection(host, port, ssl=ctx), timeout=3
@@ -130,7 +138,7 @@ class LocalFloodExecutor:
         async def worker(idx):
             end = asyncio.get_event_loop().time() + dur
             i = idx
-            while asyncio.get_event_loop().time() < end:
+            while asyncio.get_event_loop().time() < end and not self._stop_event.is_set():
                 ep = ep_list[i % len(ep_list)]
                 body = f'{{"q":"{_rand(12)}","page":{random.randint(1,50)},"ts":{random.randint(0,999999)}}}'.encode()
                 try:
@@ -176,7 +184,7 @@ class LocalFloodExecutor:
         start = asyncio.get_event_loop().time()
         end = start + dur; last = start
 
-        while asyncio.get_event_loop().time() < end:
+        while asyncio.get_event_loop().time() < end and not self._stop_event.is_set():
             alive = []
             for w in sockets:
                 try:
@@ -195,7 +203,7 @@ class LocalFloodExecutor:
         for w in sockets:
             try: w.close()
             except: pass
-        result['status'] = 'completed'
+        result['status'] = 'stopped' if self._stop_event.is_set() else 'completed'
         result['lines'].append(f'DONE connections={result["connections"]}')
         result['output'] = '\n'.join(result['lines'][-20:])
 
@@ -236,11 +244,14 @@ class LocalFloodExecutor:
     async def _run_workers(self, workers, worker_fn, dur, result, metric):
         start = asyncio.get_event_loop().time()
         tasks = [asyncio.create_task(worker_fn(i)) for i in range(workers)]
-        while asyncio.get_event_loop().time() < start + dur:
+        while asyncio.get_event_loop().time() < start + dur and not self._stop_event.is_set():
             await asyncio.sleep(5)
             self._progress(result, asyncio.get_event_loop().time() - start, dur, metric)
+        if self._stop_event.is_set():
+            for t in tasks:
+                t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        result['status'] = 'completed'
+        result['status'] = 'stopped' if self._stop_event.is_set() else 'completed'
         result['lines'].append(f'DONE {metric}={result[metric]} errors={result["errors"]}')
         result['output'] = '\n'.join(result['lines'][-20:])
 
