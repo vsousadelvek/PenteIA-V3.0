@@ -3963,7 +3963,7 @@ async def attck_matrix(
     }
 
     # Gather findings for this user
-    sims_q = db.query(Simulation).filter(Simulation.user_id == current_user.id, Simulation.status == "done")
+    sims_q = db.query(Simulation).filter(Simulation.user_id == current_user.id, Simulation.status == "completed")
     if simulation_id:
         sims_q = sims_q.filter(Simulation.id == simulation_id)
     sims = sims_q.all()
@@ -4042,9 +4042,14 @@ async def vuln_db(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    from bas_engine import ALL_TECHNIQUES
+    _SEV_NORM = {"critical": "Critical", "high": "High", "medium": "Medium", "low": "Low"}
+    _SEV_CVSS = {"Critical": 9.0, "High": 7.5, "Medium": 5.0, "Low": 3.0}
+    _TECH_META = {t.technique_id: t for t in ALL_TECHNIQUES}
+
     sims_q = db.query(Simulation).filter(
         Simulation.user_id == current_user.id,
-        Simulation.status == "done",
+        Simulation.status == "completed",
     )
     if days:
         since = datetime.utcnow() - timedelta(days=days)
@@ -4052,30 +4057,34 @@ async def vuln_db(
     sims = sims_q.order_by(Simulation.date.desc()).all()
 
     vulns = []
-    seen = set()
     for sim in sims:
         results = sim.results or {}
         for t in results.get("techniques", []):
             if status and t.get("status") != status:
                 continue
-            sev = t.get("severity", "")
+            tid = t.get("id", "")
+            # Enrich with ALL_TECHNIQUES metadata when simulation result lacks it
+            meta = _TECH_META.get(tid)
+            sev_raw = t.get("severity", "") or (meta.severity if meta else "")
+            sev = _SEV_NORM.get(sev_raw.lower(), sev_raw)
             if severity and sev.lower() != severity.lower():
                 continue
-            key = (t.get("id", ""), sim.target)
+            cvss = t.get("cvss") or _SEV_CVSS.get(sev, 0)
+            tech_info = _TECH_LAYMAN.get(tid, ("", "", ""))
             vulns.append({
-                "id": f"{sim.id}_{t.get('id','')}",
-                "technique_id": t.get("id", ""),
-                "name": t.get("name", ""),
+                "id": f"{sim.id}_{tid}",
+                "technique_id": tid,
+                "name": t.get("name", "") or (meta.name if meta else tid),
                 "severity": sev,
-                "cvss": t.get("cvss", 0),
+                "cvss": cvss,
                 "status": t.get("status", ""),
                 "target": sim.target,
                 "simulation_id": sim.id,
                 "date": sim.date.isoformat(),
                 "compliance": t.get("compliance", []),
-                "remediation": t.get("remediation", ""),
+                "remediation": t.get("remediation", "") or tech_info[2],
                 "detail": t.get("detail", ""),
-                "description": t.get("description", ""),
+                "description": t.get("description", "") or (meta.description if meta else tech_info[1]),
             })
 
     sev_order = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "": 4}
@@ -4096,7 +4105,7 @@ async def vuln_db(
 async def vuln_db_export(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     import csv, io as _io
     sims = db.query(Simulation).filter(
-        Simulation.user_id == current_user.id, Simulation.status == "done"
+        Simulation.user_id == current_user.id, Simulation.status == "completed"
     ).all()
     buf = _io.StringIO()
     writer = csv.writer(buf)
@@ -4127,7 +4136,7 @@ async def bas_retest(
     ).first()
     if not original:
         raise HTTPException(status_code=404, detail="Simulação original não encontrada")
-    if original.status != "done":
+    if original.status != "completed":
         raise HTTPException(status_code=400, detail="Simulação ainda não concluída")
 
     playbook = db.query(Playbook).filter(Playbook.id == original.playbook_id).first()
