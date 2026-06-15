@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-from fastapi import FastAPI, HTTPException, Depends, status, File, UploadFile, Request
+from fastapi import FastAPI, HTTPException, Depends, status, File, UploadFile, Request, Header, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,17 +12,36 @@ from typing import Optional, List
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-import json, os, io, time, asyncio, threading, socket as _socket
+import json, os, io, time, asyncio, threading, socket as _socket, base64 as _b64
 import requests as _requests
 import queue as _queue
+import hmac as _hmac, hashlib as _hashlib
 from pathlib import Path
+
+try:
+    from apscheduler.schedulers.background import BackgroundScheduler as _APScheduler
+    _HAS_APSCHEDULER = True
+except ImportError:
+    _HAS_APSCHEDULER = False
 
 from database import get_db, SessionLocal
 from auth import (
     get_current_user, require_admin, authenticate_user, create_access_token,
     hash_password, LoginRequest, TokenResponse, RegisterRequest
 )
-from models import User, Listener, Beacon, Playbook, Simulation, Report, Payload
+from models import User, Listener, Beacon, Playbook, Simulation, Report, Payload, PenteiaAgent, AgentTask, ScheduledScan, WebhookConfig, AuditLog, Campaign, Notification, CloudReconResult
+
+try:
+    from cloud_recon import run_cloud_recon as _run_cloud_recon
+    _HAS_CLOUD_RECON = True
+except ImportError:
+    _HAS_CLOUD_RECON = False
+
+try:
+    from payload_generator import generate_payload as _gen_payload, get_templates as _get_payload_templates, EncoderType, PayloadFormat
+    _HAS_PAYLOAD_GEN = True
+except ImportError:
+    _HAS_PAYLOAD_GEN = False
 
 from penteia_v4_orchestrator import PenteIAv4Orchestrator
 from ddos_testing import DDoSTestingEngine, DDoSConfig, DDoSMethod
@@ -33,11 +52,12 @@ from cdn_bypass import find_origin_ip
 import cloudfail_recon as _cf
 from serverless_recon import find_serverless_endpoints
 
-# — in-memory operation log (shared across requests in single-process mode)
+# — in-memory state (single-process mode only)
 _operation_logs: list = []
 _ssh_tests: dict = {}      # test_id -> {thread, result, started_at, executor}
 _scan_tasks: dict = {}     # task_id -> {"q": Queue, "done": bool, "results": list, "error": str|None, "completed_at": float}
 _login_attempts: dict = {} # ip -> [timestamps]
+_ws_clients: set = set()   # active WebSocket connections
 
 ALLOWED_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:3000").split(",")
 
@@ -60,6 +80,41 @@ if os.path.exists(static_dir):
 
 orchestrator = PenteIAv4Orchestrator()
 ddos_engine = DDoSTestingEngine()
+
+# APScheduler para agendamento de simulações
+_scheduler = None
+if _HAS_APSCHEDULER:
+    _scheduler = _APScheduler(daemon=True)
+    _scheduler.start()
+
+
+@app.on_event("startup")
+async def _startup():
+    """Re-register APScheduler jobs and create new DB tables on startup."""
+    from database import engine
+    from models import Base
+    Base.metadata.create_all(bind=engine)
+
+    if not _scheduler:
+        return
+    db_startup = SessionLocal()
+    try:
+        enabled_scans = db_startup.query(ScheduledScan).filter(ScheduledScan.enabled == True).all()
+        for scan in enabled_scans:
+            days = _interval_days(scan.interval)
+            try:
+                _scheduler.add_job(
+                    _run_scheduled_sim,
+                    trigger="interval",
+                    days=days,
+                    id=scan.id,
+                    args=[scan.id],
+                    replace_existing=True,
+                )
+            except Exception:
+                pass
+    finally:
+        db_startup.close()
 
 
 # ── Pydantic models ──────────────────────────────────────────────────────────
@@ -180,6 +235,24 @@ class CloudFailRequest(BaseModel):
     domain: str
     workers: int = 30
     use_custom_wordlist: bool = False
+
+class ScheduleCreateRequest(BaseModel):
+    playbook_id: str
+    target: str
+    interval: str = "weekly"  # daily / weekly / monthly
+
+class ScheduleToggleRequest(BaseModel):
+    enabled: bool
+
+class WebhookCreateRequest(BaseModel):
+    name: str
+    url: str
+    events: List[str] = ["simulation_complete"]
+    secret: Optional[str] = None
+
+class ComplianceReportRequest(BaseModel):
+    framework: str  # lgpd / iso27001 / pcidss
+    simulation_id: Optional[str] = None  # None = usar última simulação
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -394,6 +467,73 @@ async def send_command(
 
 # ── BAS ──────────────────────────────────────────────────────────────────────
 
+_TECHNIQUE_META = {
+    "T1590":  {"cvss": 5.3, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N", "severity": "Medium",
+               "compliance": ["OWASP A05:2021", "PCI-DSS 6.4.3"],
+               "remediation": "Configurar servidor para retornar header Server genérico (ex: 'Web Server') ou removê-lo completamente."},
+    "T1592":  {"cvss": 5.3, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N", "severity": "Medium",
+               "compliance": ["OWASP A05:2021", "NIST SC-8", "PCI-DSS 6.4.3"],
+               "remediation": "Adicionar headers: Content-Security-Policy, Strict-Transport-Security, X-Frame-Options e X-Content-Type-Options."},
+    "T1190":  {"cvss": 9.8, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", "severity": "Critical",
+               "compliance": ["OWASP A03:2021", "PCI-DSS 6.4.1", "NIST SI-10", "LGPD Art.46"],
+               "remediation": "Implementar WAF com regras SQLi atualizadas. Usar prepared statements e ORM com parametrização."},
+    "T1190b": {"cvss": 9.8, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", "severity": "Critical",
+               "compliance": ["OWASP A03:2021", "PCI-DSS 6.4.1"],
+               "remediation": "Atualizar regras WAF para detectar SQLi com comentários SQL (/**/) e variantes encodadas."},
+    "T1059":  {"cvss": 6.1, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N", "severity": "Medium",
+               "compliance": ["OWASP A03:2021", "PCI-DSS 6.4.1", "NIST SI-10"],
+               "remediation": "Implementar Content-Security-Policy e sanitização de output. WAF com regras XSS."},
+    "T1059b": {"cvss": 6.1, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N", "severity": "Medium",
+               "compliance": ["OWASP A03:2021", "PCI-DSS 6.4.1"],
+               "remediation": "Adicionar regras WAF case-insensitive para XSS. Normalizar e escapar input antes de filtrar."},
+    "T1078":  {"cvss": 9.8, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", "severity": "Critical",
+               "compliance": ["OWASP A01:2021", "PCI-DSS 8.2.1", "NIST AC-3", "LGPD Art.46"],
+               "remediation": "Garantir autenticação JWT em todos os endpoints protegidos. Redirecionar rotas sem auth para /login."},
+    "T1110":  {"cvss": 9.8, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", "severity": "Critical",
+               "compliance": ["OWASP A07:2021", "PCI-DSS 8.3.4", "NIST IA-5"],
+               "remediation": "Remover credenciais padrão. Implementar MFA e bloqueio de conta após 5 tentativas falhas."},
+    "T1499":  {"cvss": 7.5, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H", "severity": "High",
+               "compliance": ["OWASP A04:2021", "PCI-DSS 6.4.3", "NIST SC-5"],
+               "remediation": "Implementar rate limiting (ex: 10r/min por IP) em todos os endpoints críticos com resposta 429."},
+    "T1083":  {"cvss": 7.5, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N", "severity": "High",
+               "compliance": ["OWASP A01:2021", "PCI-DSS 6.4.1", "NIST SI-10"],
+               "remediation": "Validar parâmetros de caminho com allowlist. Implementar WAF com regras path traversal/LFI."},
+    "T1087":  {"cvss": 8.2, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N", "severity": "High",
+               "compliance": ["OWASP A01:2021", "PCI-DSS 8.2.1", "NIST AC-3"],
+               "remediation": "Restringir todos os endpoints de API com autenticação e autorização por role (RBAC)."},
+    "T1078b": {"cvss": 9.8, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", "severity": "Critical",
+               "compliance": ["OWASP A07:2021", "PCI-DSS 8.3.2", "NIST IA-5"],
+               "remediation": "Usar chave JWT aleatória forte (>= 256 bits). Validar claims exp/iat/iss. Rotacionar chaves regularmente."},
+    "T1595":  {"cvss": 5.3, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N", "severity": "Medium",
+               "compliance": ["OWASP A05:2021", "NIST SI-3"],
+               "remediation": "Configurar WAF para bloquear User-Agents de scanners conhecidos: sqlmap, nikto, masscan, nmap."},
+    "T1595b": {"cvss": 4.3, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:N/A:N", "severity": "Medium",
+               "compliance": ["OWASP A05:2021"],
+               "remediation": "Bloquear ou desafiar (CAPTCHA) clientes HTTP genéricos (python-requests, curl) em endpoints sensíveis."},
+    "T1185":  {"cvss": 8.8, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H", "severity": "High",
+               "compliance": ["OWASP A01:2021", "PCI-DSS 6.4.1", "NIST SC-23"],
+               "remediation": "Implementar token CSRF (SameSite=Strict + token aleatório) em todos os formulários POST."},
+    "T1602":  {"cvss": 7.5, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N", "severity": "High",
+               "compliance": ["OWASP A02:2021", "PCI-DSS 4.2.1", "NIST SC-8"],
+               "remediation": "Forçar HTTPS via redirect 301 permanente. Configurar HSTS com max-age >= 31536000 e includeSubDomains."},
+    "T1592b": {"cvss": 5.3, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N", "severity": "Medium",
+               "compliance": ["OWASP A02:2021", "PCI-DSS 6.4.3", "NIST SC-8"],
+               "remediation": "Adicionar flags HttpOnly, Secure e SameSite=Strict em todos os cookies de autenticação/sessão."},
+    "T1557":  {"cvss": 6.5, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N", "severity": "Medium",
+               "compliance": ["OWASP A05:2021", "NIST CM-7", "PCI-DSS 6.4.3"],
+               "remediation": "Desabilitar métodos HTTP não necessários (PUT, DELETE, TRACE, PATCH) na configuração do servidor web."},
+    "T1190c": {"cvss": 9.1, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N", "severity": "Critical",
+               "compliance": ["OWASP A07:2021", "PCI-DSS 8.3.2", "NIST IA-5"],
+               "remediation": "Rejeitar explicitamente JWTs com alg=none na biblioteca JWT. Definir allowlist de algoritmos aceitos."},
+    "T1190e": {"cvss": 8.1, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:N", "severity": "High",
+               "compliance": ["OWASP A01:2021", "NIST SC-8", "PCI-DSS 6.4.3"],
+               "remediation": "Configurar CORS com allowlist explícita de origens. Nunca usar Access-Control-Allow-Origin: *."},
+    "T1087b": {"cvss": 7.5, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N", "severity": "High",
+               "compliance": ["OWASP A05:2021", "PCI-DSS 6.4.3", "NIST CM-7"],
+               "remediation": "Bloquear acesso a .git, .env, .htaccess e backups via configuração nginx/Apache (deny all)."},
+}
+
+
 @app.get("/api/bas/playbooks")
 async def get_playbooks(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     playbooks = db.query(Playbook).filter(Playbook.user_id == current_user.id).all()
@@ -419,6 +559,425 @@ async def delete_playbook(playbook_id: str, current_user: User = Depends(get_cur
     db.commit()
     return {"message": "Playbook deletado"}
 
+def _bas_run(sim_id: str, playbook_name: str, target: str, severity: str, num_techniques: int):
+    """Executa simulação BAS real contra o alvo."""
+
+    # parse host:port
+    if ":" in target.split("/")[-1]:
+        parts = target.rsplit(":", 1)
+        host, port = parts[0].lstrip("http://").lstrip("https://"), int(parts[1])
+    else:
+        host = target.lstrip("http://").lstrip("https://")
+        port = 80
+    base = f"http://{host}:{port}"
+
+    techniques = []
+    hits = 0  # técnicas que encontraram fraqueza
+
+    def probe(path="/", method="GET", data=None, headers=None, timeout=5):
+        try:
+            h = {"User-Agent": "Mozilla/5.0 PenteIA-BAS/4.0"}
+            if headers: h.update(headers)
+            fn = getattr(_requests, method.lower(), _requests.get)
+            r = fn(base + path, data=data, headers=h, timeout=timeout, allow_redirects=False)
+            return r
+        except Exception:
+            return None
+
+    # T1: Service Fingerprint
+    r = probe("/")
+    server = r.headers.get("Server", "?") if r is not None else "unreachable"
+    t1 = {"id": "T1590", "name": "Service Fingerprint",
+          "status": "found" if r is not None else "blocked",
+          "http_status": r.status_code if r is not None else 0,
+          "detail": f"Server: {server} | HTTP {r.status_code if r is not None else 0}"}
+    if r is not None and r.status_code < 500: hits += 1
+    techniques.append(t1)
+
+    # T2: Security Headers
+    missing = []
+    if r is not None:
+        for hdr in ["Content-Security-Policy", "Strict-Transport-Security", "X-Frame-Options", "X-Content-Type-Options"]:
+            if hdr not in r.headers: missing.append(hdr)
+    t2 = {"id": "T1592", "name": "Security Headers Audit",
+          "status": "found" if missing else "blocked",
+          "http_status": r.status_code if r is not None else 0,
+          "detail": f"Headers ausentes: {', '.join(missing)}" if missing else "Todos os headers de segurança presentes"}
+    if missing: hits += 1
+    techniques.append(t2)
+
+    if severity in ("Medium", "High", "Critical") or num_techniques >= 4:
+        # T3: WAF Detection (SQLi — URL-encoded quote)
+        r3 = probe("/?id=1%27%20UNION%20SELECT%201--")
+        waf_standard = r3 is None or (r3 is not None and r3.status_code == 403)
+        t3_detail = ("WAF bloqueou via TCP reset" if r3 is None else
+                     "WAF retornou 403 Forbidden" if r3.status_code == 403 else
+                     f"Payload SQLi não bloqueado (HTTP {r3.status_code})")
+        t3 = {"id": "T1190", "name": "WAF Bypass Attempt (SQLi)",
+              "status": "blocked" if waf_standard else "found",
+              "http_status": r3.status_code if r3 is not None else 0,
+              "detail": t3_detail}
+        if not waf_standard: hits += 1
+        techniques.append(t3)
+
+        # T3b: WAF Bypass via SQL comment injection /**/
+        r3b = probe("/?id=1/**/UNION/**/SELECT/**/1--")
+        bypassed = r3b is not None and r3b.status_code == 200
+        t3b = {"id": "T1190b", "name": "WAF Bypass - Comment Injection",
+               "status": "found" if bypassed else "blocked",
+               "http_status": r3b.status_code if r3b is not None else 0,
+               "detail": (f"SQLi via /**/ comment bypassed WAF (HTTP {r3b.status_code})" if bypassed else
+                          "WAF bloqueou comment injection")}
+        if bypassed: hits += 1
+        techniques.append(t3b)
+
+        # T4: XSS Probe (lowercase)
+        r4 = probe("/?q=%3Cscript%3Ealert(1)%3C/script%3E")
+        xss_blocked = r4 is None or (r4 is not None and r4.status_code == 403)
+        t4 = {"id": "T1059", "name": "XSS Probe",
+              "status": "blocked" if xss_blocked else "found",
+              "http_status": r4.status_code if r4 is not None else 0,
+              "detail": ("WAF bloqueou XSS via TCP reset" if r4 is None else
+                         "WAF bloqueou XSS (403)" if r4.status_code == 403 else
+                         f"XSS não filtrado (HTTP {r4.status_code})")}
+        if not xss_blocked: hits += 1
+        techniques.append(t4)
+
+        # T4b: XSS Case-Mix Bypass <ScRiPt>
+        r4b = probe("/?q=<ScRiPt>alert(1)</ScRiPt>")
+        xss_bypass = r4b is not None and r4b.status_code == 200
+        t4b = {"id": "T1059b", "name": "WAF Bypass - Case Mix XSS",
+               "status": "found" if xss_bypass else "blocked",
+               "http_status": r4b.status_code if r4b is not None else 0,
+               "detail": (f"XSS case-mix bypassed WAF (HTTP {r4b.status_code})" if xss_bypass else
+                          "WAF bloqueou XSS case-mix")}
+        if xss_bypass: hits += 1
+        techniques.append(t4b)
+
+        # T5: Auth — acesso sem JWT
+        r5 = probe("/dashboard")
+        no_auth = r5 is not None and r5.status_code == 200
+        t5 = {"id": "T1078", "name": "Access Without Auth",
+              "status": "found" if no_auth else "blocked",
+              "http_status": r5.status_code if r5 is not None else 0,
+              "detail": "Dashboard acessível sem JWT (200)" if no_auth else f"Proteção JWT ativa ({r5.status_code if r5 is not None else 0})"}
+        if no_auth: hits += 1
+        techniques.append(t5)
+
+        # T6: Credential Brute Force (login fraco)
+        r6 = probe("/login", method="POST", data="username=admin&password=admin")
+        auth_ok = r6 is not None and r6.status_code == 200 and b"csrf" not in (r6.content or b"")
+        t6 = {"id": "T1110", "name": "Default Credential Test",
+              "status": "found" if auth_ok else "blocked",
+              "http_status": r6.status_code if r6 is not None else 0,
+              "detail": "Login com admin:admin retornou 200" if auth_ok else f"Login protegido ({r6.status_code if r6 is not None else 0})"}
+        if auth_ok: hits += 1
+        techniques.append(t6)
+
+    if severity in ("High", "Critical") or num_techniques >= 6:
+        # T7: Rate Limit — 40 requests para garantir passar do limite 30r/10s
+        codes = []
+        for _ in range(40):
+            rr = probe("/api/v1/users")
+            if rr is not None: codes.append(rr.status_code)
+        rate_limited = 429 in codes
+        first_429 = next((i+1 for i, c in enumerate(codes) if c == 429), None)
+        if not codes:
+            t7_status, t7_detail = "unknown", "Serviço inacessível — rate limit não verificável"
+        elif rate_limited:
+            t7_status, t7_detail = "blocked", f"Rate limiting ativo — 429 no request #{first_429}"
+        else:
+            t7_status, t7_detail = "found", f"Sem rate limiting em {len(codes)} requests consecutivos"
+            hits += 1
+        t7 = {"id": "T1499", "name": "Rate Limit Probe",
+              "status": t7_status,
+              "http_status": 429 if rate_limited else (codes[-1] if codes else 0),
+              "detail": t7_detail}
+        techniques.append(t7)
+
+        # T8: Path Traversal (standard + double-encoded)
+        r8 = probe("/?file=../../etc/passwd")
+        r8b = probe("/?file=..%2F..%2Fetc%2Fpasswd")
+        lfi_blocked = (r8 is None or (r8 is not None and r8.status_code == 403)) and \
+                      (r8b is None or (r8b is not None and r8b.status_code == 403))
+        t8 = {"id": "T1083", "name": "Path Traversal Probe",
+              "status": "blocked" if lfi_blocked else "found",
+              "http_status": r8.status_code if r8 is not None else 0,
+              "detail": ("WAF bloqueou LFI (direto e URL-encoded)" if lfi_blocked else
+                         f"LFI não bloqueado — padrão={r8.status_code if r8 is not None else 0}, encoded={r8b.status_code if r8b is not None else 0}")}
+        if not lfi_blocked: hits += 1
+        techniques.append(t8)
+
+        # T9: Admin API sem auth
+        r9 = probe("/api/v1/users")
+        api_open = r9 is not None and r9.status_code == 200
+        t9 = {"id": "T1087", "name": "Admin API Enumeration",
+              "status": "found" if api_open else "blocked",
+              "http_status": r9.status_code if r9 is not None else 0,
+              "detail": "API /users acessível sem auth" if api_open else f"API protegida ({r9.status_code if r9 is not None else 0})"}
+        if api_open: hits += 1
+        techniques.append(t9)
+
+        # T9b: JWT Known Token Test (demo/predictable token)
+        demo_jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZG1pbiIsInJvbGUiOiJhZG1pbiJ9.demo"
+        r9b = probe("/api/v1/users", headers={"Authorization": f"Bearer {demo_jwt}"})
+        jwt_works = r9b is not None and r9b.status_code == 200
+        t9b = {"id": "T1078b", "name": "JWT Auth - Known Token Test",
+               "status": "found" if jwt_works else "blocked",
+               "http_status": r9b.status_code if r9b is not None else 0,
+               "detail": (f"Demo JWT aceito como auth válida (HTTP {r9b.status_code})" if jwt_works else
+                          "JWT demo token rejeitado corretamente")}
+        if jwt_works: hits += 1
+        techniques.append(t9b)
+
+    if severity == "Critical" or num_techniques >= 8:
+        # T10: Scanner UA bypass — sqlmap string exacta
+        r10 = probe("/", headers={"User-Agent": "sqlmap/1.7"})
+        if r10 is None:
+            t10_status, t10_detail = "unknown", "Serviço inacessível — UA detection não verificável"
+        elif r10.status_code == 403:
+            t10_status, t10_detail = "blocked", "WAF bloqueia User-Agent sqlmap/1.7"
+        else:
+            t10_status, t10_detail = "found", f"Scanner UA sqlmap não detectado (HTTP {r10.status_code})"
+            hits += 1
+        t10 = {"id": "T1595", "name": "Scanner UA Detection (sqlmap)",
+               "status": t10_status,
+               "http_status": r10.status_code if r10 is not None else 0,
+               "detail": t10_detail}
+        techniques.append(t10)
+
+        # T10b: Generic HTTP Client UA (python-requests/curl — fácil de usar para evasão)
+        r10b = probe("/", headers={"User-Agent": "python-requests/2.31.0"})
+        if r10b is None:
+            t10b_status, t10b_detail = "unknown", "Serviço inacessível — generic UA não verificável"
+        elif r10b.status_code == 403:
+            t10b_status, t10b_detail = "blocked", "Generic HTTP client bloqueado pelo WAF"
+        else:
+            t10b_status, t10b_detail = "found", f"python-requests/curl não bloqueados — evasão de UA trivial (HTTP {r10b.status_code})"
+            hits += 1
+        t10b = {"id": "T1595b", "name": "Scanner UA - Generic HTTP Client",
+                "status": t10b_status,
+                "http_status": r10b.status_code if r10b is not None else 0,
+                "detail": t10b_detail}
+        techniques.append(t10b)
+
+        # T11: CSRF — verifica presença de token
+        r11 = probe("/login")
+        if r11 is None:
+            t11_status, t11_detail = "unknown", "Serviço inacessível — CSRF não verificável"
+        elif b"csrf" in (r11.content or b"").lower():
+            t11_status, t11_detail = "blocked", "Token CSRF presente no formulário"
+        else:
+            t11_status, t11_detail = "found", "Sem proteção CSRF detectada"
+            hits += 1
+        t11 = {"id": "T1185", "name": "CSRF Token Check",
+               "status": t11_status,
+               "http_status": r11.status_code if r11 is not None else 0,
+               "detail": t11_detail}
+        techniques.append(t11)
+
+        # T12: TLS / HTTPS Enforcement
+        r12 = probe("/")
+        if r12 is None:
+            t12_status, t12_detail = "unknown", "Serviço inacessível — TLS não verificável"
+        else:
+            tls_redirect = r12.status_code in (301, 302) and r12.headers.get("Location", "").startswith("https://")
+            hsts_present = "Strict-Transport-Security" in r12.headers
+            if tls_redirect or hsts_present:
+                parts = []
+                if tls_redirect: parts.append("redirect HTTPS ativo")
+                if hsts_present: parts.append("HSTS configurado")
+                t12_status, t12_detail = "blocked", " | ".join(parts)
+            else:
+                t12_status = "found"
+                t12_detail = f"Serviço em HTTP puro sem redirect para HTTPS (HTTP {r12.status_code})"
+                hits += 1
+        t12 = {"id": "T1602", "name": "TLS / HTTPS Enforcement",
+               "status": t12_status,
+               "http_status": r12.status_code if r12 is not None else 0,
+               "detail": t12_detail}
+        techniques.append(t12)
+
+        # T13: Cookie Security Flags
+        r13 = probe("/login", method="POST", data="username=probe&password=probe")
+        set_cookie = r13.headers.get("Set-Cookie", "") if r13 is not None else ""
+        missing_flags = []
+        if set_cookie:
+            if "HttpOnly" not in set_cookie: missing_flags.append("HttpOnly")
+            if "Secure" not in set_cookie: missing_flags.append("Secure")
+            if "SameSite" not in set_cookie: missing_flags.append("SameSite")
+        if not set_cookie:
+            t13_status, t13_detail = "blocked", "Sem cookies de sessão detectados no /login"
+        elif missing_flags:
+            t13_status = "found"
+            t13_detail = f"Cookie de sessão sem flags obrigatórias: {', '.join(missing_flags)}"
+            hits += 1
+        else:
+            t13_status, t13_detail = "blocked", "Cookie com HttpOnly, Secure e SameSite configurados"
+        t13 = {"id": "T1592b", "name": "Cookie Security Flags",
+               "status": t13_status,
+               "http_status": r13.status_code if r13 is not None else 0,
+               "detail": t13_detail}
+        techniques.append(t13)
+
+        # T14: HTTP Method Enumeration (OPTIONS)
+        r14 = probe("/", method="OPTIONS")
+        if r14 is None:
+            t14_status, t14_detail = "unknown", "Serviço inacessível — métodos não verificáveis"
+        else:
+            allow = r14.headers.get("Allow", r14.headers.get("Access-Control-Allow-Methods", ""))
+            dangerous = [m for m in ("PUT", "DELETE", "TRACE", "PATCH") if m in allow.upper()]
+            if dangerous:
+                t14_status = "found"
+                t14_detail = f"Métodos perigosos habilitados via OPTIONS: {', '.join(dangerous)}"
+                hits += 1
+            else:
+                t14_status = "blocked"
+                t14_detail = f"Métodos restritos (Allow: {allow or 'não exposto'})"
+        t14 = {"id": "T1557", "name": "HTTP Method Enumeration",
+               "status": t14_status,
+               "http_status": r14.status_code if r14 is not None else 0,
+               "detail": t14_detail}
+        techniques.append(t14)
+
+        # T15: JWT Algorithm None Bypass
+        _hdr = _b64.b64encode(json.dumps({"alg": "none", "typ": "JWT"}).encode()).rstrip(b"=").decode()
+        _pay = _b64.b64encode(json.dumps({"sub": "admin", "role": "admin"}).encode()).rstrip(b"=").decode()
+        r15 = probe("/api/v1/users", headers={"Authorization": f"Bearer {_hdr}.{_pay}."})
+        if r15 is None:
+            t15_status, t15_detail = "unknown", "Serviço inacessível — JWT alg:none não verificável"
+        elif r15 is not None and r15.status_code == 200:
+            t15_status = "found"
+            t15_detail = "JWT alg=none ACEITO — bypass de autenticação confirmado (HTTP 200)"
+            hits += 1
+        else:
+            t15_status, t15_detail = "blocked", f"JWT alg=none rejeitado corretamente (HTTP {r15.status_code})"
+        t15 = {"id": "T1190c", "name": "JWT Algorithm None Bypass",
+               "status": t15_status,
+               "http_status": r15.status_code if r15 is not None else 0,
+               "detail": t15_detail}
+        techniques.append(t15)
+
+        # T16: CORS Misconfiguration
+        r16 = probe("/api/v1/users", headers={"Origin": "https://evil-corp.com"})
+        if r16 is None:
+            t16_status, t16_detail = "unknown", "Serviço inacessível — CORS não verificável"
+        else:
+            acao = r16.headers.get("Access-Control-Allow-Origin", "")
+            acac = r16.headers.get("Access-Control-Allow-Credentials", "")
+            cors_vuln = acao in ("*", "https://evil-corp.com") or "evil-corp.com" in acao
+            if cors_vuln:
+                t16_status = "found"
+                t16_detail = f"CORS permissivo: ACAO={acao} ACAC={acac} — origem refletida ou wildcard"
+                hits += 1
+            else:
+                t16_status = "blocked"
+                t16_detail = f"CORS restritivo (Access-Control-Allow-Origin: {acao or 'não exposto'})"
+        t16 = {"id": "T1190e", "name": "CORS Misconfiguration",
+               "status": t16_status,
+               "http_status": r16.status_code if r16 is not None else 0,
+               "detail": t16_detail}
+        techniques.append(t16)
+
+        # T17: Sensitive File Exposure (.git, .env, backup)
+        t17_http = 0
+        sensitive_exposed = []
+        for sp in ("/.git/HEAD", "/.env", "/.htaccess", "/backup.zip"):
+            rs = probe(sp)
+            if rs is not None:
+                t17_http = rs.status_code
+                if rs.status_code == 200:
+                    sensitive_exposed.append(sp)
+        if sensitive_exposed:
+            t17_status = "found"
+            t17_detail = f"Arquivos sensíveis expostos: {', '.join(sensitive_exposed)}"
+            hits += 1
+        else:
+            t17_status = "blocked"
+            t17_detail = "Arquivos sensíveis protegidos (.git, .env, .htaccess, backup)"
+        t17 = {"id": "T1087b", "name": "Sensitive File Exposure",
+               "status": t17_status,
+               "http_status": t17_http,
+               "detail": t17_detail}
+        techniques.append(t17)
+
+    # Enriquecer todas as técnicas com CVSS, compliance e remediação
+    for t in techniques:
+        meta = _TECHNIQUE_META.get(t["id"], {})
+        t["cvss_score"] = meta.get("cvss", 0.0)
+        t["cvss_vector"] = meta.get("vector", "")
+        t["cvss_severity"] = meta.get("severity", "Info")
+        t["compliance"] = meta.get("compliance", [])
+        t["remediation"] = meta.get("remediation", "") if t["status"] == "found" else ""
+
+    # Risk score CVSS-weighted: % do risco total possível que foi explorado
+    total_cvss = sum(t["cvss_score"] for t in techniques)
+    found_cvss = sum(t["cvss_score"] for t in techniques if t["status"] == "found")
+    score = round((found_cvss / max(total_cvss, 0.01)) * 100, 1)
+
+    # Detection coverage: % das técnicas que foram detectadas/bloqueadas
+    testable = [t for t in techniques if t["status"] in ("found", "blocked")]
+    detected = [t for t in testable if t["status"] == "blocked"]
+    detection_coverage_pct = round(len(detected) / max(len(testable), 1) * 100, 1)
+
+    # Adicionar detection_status em cada técnica
+    for t in techniques:
+        if t["status"] == "blocked":
+            t["detection_status"] = "detected"
+        elif t["status"] == "found":
+            t["detection_status"] = "undetected"
+        else:
+            t["detection_status"] = "unknown"
+
+    # Contagem por severidade para o webhook
+    critical_count = sum(1 for t in techniques if t["status"] == "found" and t.get("cvss_severity") == "Critical")
+
+    results_payload = {
+        "techniques": techniques,
+        "hits": hits,
+        "total": len(techniques),
+        "target": target,
+        "detection_coverage_pct": detection_coverage_pct,
+    }
+
+    db2 = SessionLocal()
+    try:
+        sim = db2.query(Simulation).filter(Simulation.id == sim_id).first()
+        if sim:
+            user_id = sim.user_id
+            sim.status = "completed"
+            sim.score = score
+            sim.results = results_payload
+            db2.commit()
+            # Disparar webhooks pós-simulação
+            _fire_webhooks_sync(user_id, "simulation_complete", {
+                "event": "simulation_complete",
+                "simulation_id": sim_id,
+                "target": target,
+                "score": score,
+                "critical_count": critical_count,
+                "detection_coverage_pct": detection_coverage_pct,
+                "timestamp": datetime.utcnow().isoformat(),
+            })
+            # Atualizar scheduled scan last_run se existir
+            sched = db2.query(ScheduledScan).filter(
+                ScheduledScan.playbook_id == sim.playbook_id,
+                ScheduledScan.target == target,
+                ScheduledScan.user_id == user_id,
+                ScheduledScan.enabled == True,
+            ).first()
+            if sched:
+                sched.last_run = datetime.utcnow()
+                db2.commit()
+    finally:
+        db2.close()
+
+    _operation_logs.append({
+        "module": "BAS", "action": "Simulação concluída",
+        "details": f"{playbook_name} → {target} | score={score}% | {len(techniques)} técnicas | detecção={detection_coverage_pct}%",
+        "timestamp": datetime.utcnow().isoformat(),
+    })
+
 @app.post("/api/bas/execute")
 async def execute_playbook(
     req: PlaybookExecuteRequest,
@@ -430,6 +989,12 @@ async def execute_playbook(
     simulation = Simulation(user_id=current_user.id, playbook_id=req.playbook_id, target=req.target, status="running", score=0.0)
     db.add(simulation)
     db.commit()
+    db.refresh(simulation)
+    threading.Thread(
+        target=_bas_run,
+        args=(simulation.id, playbook.name, req.target, playbook.severity, playbook.techniques),
+        daemon=True
+    ).start()
     _operation_logs.append({"module": "BAS", "action": "Simulação iniciada", "details": f"{playbook.name} → {req.target}", "timestamp": datetime.utcnow().isoformat()})
     return {"id": simulation.id, "status": "running", "message": "Simulação iniciada"}
 
@@ -437,25 +1002,987 @@ async def execute_playbook(
 async def get_simulations(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     sims = db.query(Simulation).filter(Simulation.user_id == current_user.id).all()
     return {"simulations": [
-        {"id": s.id, "playbook_id": s.playbook_id, "target": s.target, "status": s.status, "score": s.score, "date": s.date.isoformat()}
+        {"id": s.id, "playbook_id": s.playbook_id, "target": s.target, "status": s.status,
+         "score": s.score, "date": s.date.isoformat(), "results": s.results or {}}
         for s in sims
     ]}
 
 
 # ── Reporting ────────────────────────────────────────────────────────────────
 
+def _collect_report_data(user_id: str, db) -> dict:
+    """Coleta dados reais de todos os módulos para o relatório."""
+    sims = db.query(Simulation).filter(Simulation.user_id == user_id).order_by(Simulation.date.desc()).limit(20).all()
+    sim_data = []
+    for s in sims:
+        res = s.results or {}
+        techniques = res.get("techniques", [])
+        vulns = [t for t in techniques if t.get("status") == "found"]
+        sim_data.append({
+            "playbook": s.playbook_id or "—",
+            "target": res.get("target", s.target or "—"),
+            "status": s.status,
+            "score": s.score or 0,
+            "hits": len(vulns),
+            "total": len(techniques),
+            "techniques": techniques,
+            "vulns": vulns,
+            "created_at": s.date.isoformat() if s.date else "—",
+        })
+
+    listeners = db.query(Listener).filter(Listener.user_id == user_id).all()
+    beacons   = db.query(Beacon).filter(Beacon.user_id == user_id).all()
+    payloads  = db.query(Payload).filter(Payload.user_id == user_id).all()
+
+    # Agentes OS-level
+    agents = db.query(PenteiaAgent).filter(PenteiaAgent.user_id == user_id).all()
+    agent_data = []
+    for a in agents:
+        tasks = db.query(AgentTask).filter(
+            AgentTask.agent_id == a.id,
+            AgentTask.status == "completed"
+        ).all()
+        agent_data.append({
+            "hostname": a.hostname, "ip": a.ip, "os_info": a.os_info,
+            "username": a.username, "last_seen": a.last_seen.isoformat() if a.last_seen else "—",
+            "results": [t.result for t in tasks if t.result],
+        })
+
+    return {
+        "simulations": sim_data,
+        "listeners": [{"name": l.name, "host": l.host, "port": l.port, "protocol": l.protocol} for l in listeners],
+        "beacons":    [{"hostname": b.hostname, "ip": b.ip, "user": b.user, "status": b.status} for b in beacons],
+        "payloads":   [{"name": p.name, "type": p.type, "size": p.size} for p in payloads],
+        "agents":     agent_data,
+    }
+
+
+_TECH_LAYMAN = {
+    "T1590":  ("Identificação do Servidor",        "O servidor revela qual software usa. Um atacante usa essa informação para escolher ataques específicos contra essa versão.", "Configurar o servidor para não divulgar nome nem versão do software."),
+    "T1592":  ("Cabeçalhos de Segurança",          "Configurações que dizem ao navegador como se proteger de ataques. Faltando, o site fica vulnerável a sequestros de sessão e ataques de conteúdo.", "Ativar os cabeçalhos de segurança HTTP recomendados pelo padrão OWASP."),
+    "T1190":  ("Injeção de Código no Banco (SQLi)","Envio de comandos maliciosos no lugar de dados normais. Pode vazar, alterar ou destruir toda a base de dados da empresa.", "Validar e sanitizar todos os dados recebidos. Usar consultas parametrizadas."),
+    "T1190b": ("Injeção SQL com Disfarce",         "Variação do ataque anterior usando truques para burlar filtros básicos de segurança.", "Implementar WAF (Firewall de Aplicação Web) com regras atualizadas."),
+    "T1059":  ("Injeção de Script (XSS)",          "Código malicioso inserido em páginas web que executa no navegador de outros usuários, podendo roubar senhas e sessões.", "Escapar todo conteúdo exibido ao usuário. Ativar Content Security Policy (CSP)."),
+    "T1059b": ("Injeção de Script Disfarçada",     "Variação do XSS que usa letras alternadas para burlar filtros simples.", "Usar biblioteca de sanitização validada e WAF com detecção de XSS."),
+    "T1078":  ("Acesso sem Autenticação",          "Tentativa de acessar áreas restritas sem usuário e senha.", "Protegido — autenticação JWT obrigatória em todas as rotas privadas."),
+    "T1078b": ("Token de Acesso Falso",            "Tentativa de usar um token de autenticação inválido ou adulterado.", "Protegido — sistema rejeita tokens inválidos corretamente."),
+    "T1110":  ("Teste de Senhas Padrão",           "Tentativa de login usando senhas comuns (admin/admin, root/123456 etc.).", "Protegido — login bloqueado ou senha padrão não funciona."),
+    "T1499":  ("Limite de Requisições (Rate Limit)","Teste para verificar se o servidor bloqueia usuários que fazem muitas requisições em pouco tempo (prevenção de força bruta e DDoS).", "Configurar limite de requisições por IP (ex: máx. 10 por segundo). Retornar erro 429."),
+    "T1083":  ("Acesso a Arquivos Internos (LFI)", "Tentativa de ler arquivos internos do servidor via URL (ex: senhas do sistema).", "Validar e bloquear paths com ../ e variações codificadas na URL."),
+    "T1087":  ("Enumeração de Usuários/APIs",      "Tentativa de listar usuários e endpoints da API sem permissão.", "Protegido — API exige autenticação válida."),
+    "T1595":  ("Detecção de Ferramentas de Ataque","O servidor reconhece e bloqueia ferramentas conhecidas de hacking (sqlmap, nikto etc.).", "Configurar bloqueio de User-Agents de scanners conhecidos no WAF."),
+    "T1595b": ("Clientes HTTP Genéricos",          "Teste se scripts e ferramentas simples de automação HTTP são bloqueadas.", "Configurar WAF para bloquear clientes HTTP não-browser comuns (curl, python-requests)."),
+    "T1185":  ("Proteção CSRF",                    "Verifica se formulários possuem token anti-falsificação de requisição.", "Protegido — tokens CSRF presentes e validados."),
+    "T1602":  ("HSTS — Forçar HTTPS",             "Verifica se o site força conexão criptografada sempre.", "Protegido — HSTS configurado corretamente."),
+    "T1592b": ("Cookies de Sessão Seguros",        "Verifica se os cookies de login têm flags de segurança (HTTPOnly, Secure).", "Protegido — sem cookies inseguros expostos."),
+    "T1557":  ("Métodos HTTP Perigosos",           "Verifica se métodos como PUT, DELETE e OPTIONS estão expostos sem necessidade.", "Protegido — somente métodos necessários permitidos."),
+    "T1190c": ("Falha na Validação de Token JWT",  "Tenta usar truques para forjar tokens de autenticação sem a chave secreta.", "Protegido — algoritmo 'none' rejeitado corretamente."),
+    "T1190e": ("Controle de Origem (CORS)",        "Verifica se qualquer site externo consegue fazer requisições autenticadas.", "Protegido — CORS restritivo configurado."),
+    "T1087b": ("Arquivos Sensíveis Expostos",      "Tentativa de acessar arquivos de configuração, senhas e código-fonte via URL.", "Protegido — .git, .env, backups e configs bloqueados."),
+    # Agente OS-level
+    "T1082":  ("Informações do Sistema",           "Coleta de dados do sistema operacional, usuário logado e configurações do servidor.", "Restringir quem pode acessar informações de sistema. Usar princípio do menor privilégio."),
+    "T1548":  ("Escalada de Privilégio",           "Verifica se existe forma de um usuário comum virar administrador do sistema.", "Remover binários SUID desnecessários. Configurar sudo com princípio do menor privilégio."),
+    "T1552":  ("Senhas e Credenciais Expostas",    "Busca por senhas salvas em arquivos, histórico de comandos e variáveis de ambiente.", "Nunca salvar senhas em arquivos. Usar cofre de segredos (ex: HashiCorp Vault, AWS Secrets Manager)."),
+    "T1053":  ("Tarefas Automáticas Suspeitas",    "Verifica tarefas agendadas que podem ser usadas para manter acesso persistente.", "Auditar e remover tarefas agendadas não autorizadas. Monitorar criação de novos jobs."),
+    "T1016":  ("Reconhecimento de Rede Interna",   "Mapeamento de outros servidores e serviços acessíveis dentro da rede.", "Segmentar rede com VLANs. Implementar firewall interno entre serviços."),
+    "T1057":  ("Processos Suspeitos em Execução",  "Verifica se ferramentas de ataque estão rodando no servidor.", "Implementar allowlist de processos. Monitorar execução de processos com EDR."),
+}
+
+_SEV_LABEL = {"Critical": "CRÍTICO", "High": "ALTO", "Medium": "MÉDIO", "Low": "BAIXO"}
+_SEV_COLOR = {
+    "Critical": "#c0392b",
+    "High":     "#e67e22",
+    "Medium":   "#f39c12",
+    "Low":      "#2980b9",
+    "":         "#7f8c8d",
+}
+
+def _build_pdf(title: str, report_type: str, data: dict, generated_at: str) -> bytes:  # noqa: C901
+    import math
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib import colors
+    from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table,
+                                    TableStyle, HRFlowable, PageBreak, KeepTogether)
+    from reportlab.lib.units import cm
+    from reportlab.graphics.shapes import Drawing, Wedge, Circle, Line, Rect
+    from reportlab.graphics.shapes import String as GStr
+    from reportlab.graphics.charts.piecharts import Pie
+    from reportlab.graphics.charts.barcharts import VerticalBarChart
+
+    W, H = A4
+    M  = 1.8 * cm          # margens: 51pt cada lado
+    CW = W - 2 * M         # largura de conteúdo ≈ 493pt
+
+    # ── Paleta ───────────────────────────────────────────────────────────────
+    C     = colors.HexColor
+    NAVY  = C("#0d1b2a");  NAVY2 = C("#182635")
+    TEAL  = C("#00b4d8");  TEAL2 = C("#48cae4")
+    ORANG = C("#ff6b35");  YELLO = C("#ffd166")
+    GREEN = C("#06d6a0");  CRED  = C("#ef476f")
+    GR1   = C("#f8f9fa");  GR2   = C("#e9ecef")
+    GR3   = C("#6c757d");  DARK  = C("#212529")
+    WHT   = colors.white
+    SEV_C = {"Critical": CRED, "High": ORANG, "Medium": YELLO, "Low": TEAL}
+    SEV_P = {"Critical": "CRÍTICO", "High": "ALTO", "Medium": "MÉDIO", "Low": "BAIXO"}
+
+    # ── Estilos ──────────────────────────────────────────────────────────────
+    ss = getSampleStyleSheet()
+    def S(n, **kw): return ParagraphStyle(n, parent=ss["Normal"], **kw)
+
+    SECTION = S("SN",  fontSize=16, textColor=NAVY,  fontName="Helvetica-Bold", spaceBefore=10, spaceAfter=5,  leading=20)
+    H2S     = S("H2S", fontSize=11, textColor=DARK,  fontName="Helvetica-Bold", spaceBefore=7,  spaceAfter=3,  leading=14)
+    BODY    = S("BDS", fontSize=9,  textColor=DARK,  leading=14, spaceAfter=3)
+    BOLD9   = S("B9S", fontSize=9,  textColor=DARK,  fontName="Helvetica-Bold", leading=14)
+    FIX     = S("FXS", fontSize=9,  textColor=C("#1a5276"), leading=14)
+    CAP     = S("CPS", fontSize=7.5, textColor=GR3,  leading=11)
+    SML     = S("SMS", fontSize=8,   textColor=GR3,  leading=11)
+    V_OK    = S("VOK", fontSize=22, textColor=GREEN, fontName="Helvetica-Bold", leading=28)
+    V_AT    = S("VAT", fontSize=22, textColor=ORANG, fontName="Helvetica-Bold", leading=28)
+    V_CR    = S("VCR", fontSize=22, textColor=CRED,  fontName="Helvetica-Bold", leading=28)
+
+    # ── Dados ────────────────────────────────────────────────────────────────
+    sims = data.get("simulations", [])
+    done = [s for s in sims if s.get("status") == "completed"]
+
+    all_techs: list = []
+    for s in done:
+        for t in s.get("techniques", []):
+            t["_target"] = s.get("target", "—")
+            all_techs.append(t)
+
+    vulns = [t for t in all_techs if t.get("status") == "found"]
+    safes = [t for t in all_techs if t.get("status") in ("blocked", "safe")]
+    score = round(sum(s.get("score", 0) for s in done) / max(len(done), 1), 1) if done else 0.0
+
+    crit = [t for t in vulns if t.get("cvss_severity") == "Critical"]
+    high = [t for t in vulns if t.get("cvss_severity") == "High"]
+    meds = [t for t in vulns if t.get("cvss_severity") == "Medium"]
+    lows = [t for t in vulns if t.get("cvss_severity") == "Low"]
+
+    agents = data.get("agents", [])
+    ag_v: list = []
+    for ag in agents:
+        for r in ag.get("results", []):
+            if r.get("status") == "found":
+                r["_host"] = ag.get("hostname", "—")
+                ag_v.append(r)
+
+    n_vuln = len(set(t.get("id", "") for t in vulns)) + len(ag_v)
+    n_safe = len(safes)
+    n_test = len(all_techs)
+
+    if score < 20:
+        vtext, vstyle, vhex, vdesc = (
+            "BOM NÍVEL DE SEGURANÇA", V_OK, "#06d6a0",
+            "O servidor demonstrou boa resistência. A maioria dos controles de segurança está "
+            "funcionando. Corrija os poucos pontos indicados para atingir excelência.")
+    elif score < 50:
+        vtext, vstyle, vhex, vdesc = (
+            "ATENÇÃO NECESSÁRIA", V_AT, "#ff6b35",
+            "Vulnerabilidades identificadas que requerem atenção. Um atacante motivado poderia "
+            "explorar os pontos fracos encontrados. Corrija com prioridade.")
+    else:
+        vtext, vstyle, vhex, vdesc = (
+            "RISCO CRÍTICO", V_CR, "#ef476f",
+            "Múltiplas falhas graves confirmadas. O servidor está significativamente exposto. "
+            "Ação corretiva urgente é necessária antes de qualquer nova exposição.")
+
+    # ── Desenhos / Gráficos ──────────────────────────────────────────────────
+
+    def make_gauge(sc: float, gw: int = 228, gh: int = 152) -> Drawing:
+        d  = Drawing(gw, gh)
+        cx = gw / 2;  cy = 28
+        R  = min(gw / 2 - 16, gh - 40);  r = R * 0.60
+
+        for sa, ea, col in [(120, 180, GREEN), (60, 120, YELLO), (0, 60, CRED)]:
+            wdg = Wedge(cx, cy, R, sa, ea, radius1=r)
+            wdg.fillColor = col;  wdg.strokeColor = WHT;  wdg.strokeWidth = 2
+            d.add(wdg)
+
+        for pct in [0, 25, 50, 75, 100]:
+            ang = math.radians(180 * (1 - pct / 100))
+            tck = Line(cx + (R + 2) * math.cos(ang),  cy + (R + 2) * math.sin(ang),
+                       cx + (R + 9) * math.cos(ang),  cy + (R + 9) * math.sin(ang))
+            tck.strokeColor = GR3;  tck.strokeWidth = 1
+            d.add(tck)
+            lx = cx + (R + 18) * math.cos(ang)
+            ly = cy + (R + 18) * math.sin(ang) - 4
+            lbl = GStr(lx, ly, f"{pct}%")
+            lbl.fontSize = 6.5;  lbl.fillColor = GR3
+            lbl.textAnchor = "middle";  lbl.fontName = "Helvetica"
+            d.add(lbl)
+
+        na = math.radians(180 * (1 - sc / 100));  nl = r * 0.88
+        shd = Line(cx + 1.5, cy - 1.5, cx + nl * math.cos(na) + 1.5, cy + nl * math.sin(na) - 1.5)
+        shd.strokeColor = C("#aaaaaa");  shd.strokeWidth = 5;  shd.strokeLineCap = 1
+        d.add(shd)
+        ndl = Line(cx, cy, cx + nl * math.cos(na), cy + nl * math.sin(na))
+        ndl.strokeColor = NAVY;  ndl.strokeWidth = 3;  ndl.strokeLineCap = 1
+        d.add(ndl)
+
+        csh = Circle(cx + 1, cy - 1, 10);  csh.fillColor = C("#aaaaaa");  csh.strokeColor = None
+        d.add(csh)
+        cap = Circle(cx, cy, 10);  cap.fillColor = NAVY;  cap.strokeColor = WHT;  cap.strokeWidth = 1.5
+        d.add(cap)
+
+        bw, bh = 68, 30;  bx = cx - bw / 2;  by = cy + r * 0.32
+        bg = Rect(bx, by, bw, bh, rx=4, ry=4)
+        bg.fillColor = NAVY;  bg.strokeColor = TEAL;  bg.strokeWidth = 1.2
+        d.add(bg)
+        sv = GStr(cx, by + 9, f"{sc:.1f}%")
+        sv.fontName = "Helvetica-Bold";  sv.fontSize = 16
+        sv.fillColor = WHT;  sv.textAnchor = "middle"
+        d.add(sv)
+        sl = GStr(cx, by + 3, "RISCO")
+        sl.fontName = "Helvetica";  sl.fontSize = 6
+        sl.fillColor = TEAL2;  sl.textAnchor = "middle"
+        d.add(sl)
+
+        for txt, xo in [("SEGURO", -R + 8), ("CRÍTICO", R - 44)]:
+            gl = GStr(cx + xo, cy - 15, txt)
+            gl.fontSize = 6.5;  gl.fillColor = GR3;  gl.fontName = "Helvetica-Bold"
+            d.add(gl)
+        return d
+
+    def make_donut(vals_cols: list, dw: int = 185, dh: int = 185) -> Drawing:
+        d = Drawing(dw, dh)
+        if not any(v for v, _ in vals_cols):
+            # placeholder quando não há dados
+            ph = Circle(dw/2, dh/2, (dw-30)/2)
+            ph.fillColor = GR2;  ph.strokeColor = GR2;  ph.strokeWidth = 0
+            d.add(ph)
+            hole = Circle(dw/2, dh/2, (dw-30)/2 * 0.44)
+            hole.fillColor = WHT;  hole.strokeColor = None
+            d.add(hole)
+            lbl = GStr(dw/2, dh/2-5, "sem dados")
+            lbl.fontSize=9; lbl.fillColor=GR3; lbl.textAnchor="middle"; lbl.fontName="Helvetica"
+            d.add(lbl)
+            return d
+        p = Pie()
+        p.x = 15;  p.y = 15;  p.width = dw - 30;  p.height = dh - 30
+        p.data = [max(v, 0.001) for v, _ in vals_cols]
+        for i, (v, hx) in enumerate(vals_cols):
+            p.slices[i].fillColor  = C(hx)
+            p.slices[i].strokeColor = WHT
+            p.slices[i].strokeWidth = 2.5
+            p.slices[i].label_visible = 0
+        d.add(p)
+        hole = Circle(dw / 2, dh / 2, (dw - 30) / 2 * 0.44)
+        hole.fillColor = WHT;  hole.strokeColor = None
+        d.add(hole)
+        total = sum(v for v, _ in vals_cols)
+        cnt = GStr(dw / 2, dh / 2 - 6, str(total))
+        cnt.fontName = "Helvetica-Bold";  cnt.fontSize = 18
+        cnt.fillColor = DARK;  cnt.textAnchor = "middle"
+        d.add(cnt)
+        lbl = GStr(dw / 2, dh / 2 - 15, "total")
+        lbl.fontName = "Helvetica";  lbl.fontSize = 8
+        lbl.fillColor = GR3;  lbl.textAnchor = "middle"
+        d.add(lbl)
+        return d
+
+    def make_bars(cats: list, v_v: list, v_s: list, bw: int = 240, bh: int = 185) -> Drawing:
+        d = Drawing(bw, bh)
+        if not cats:
+            return d
+        bc = VerticalBarChart()
+        bc.x = 42;  bc.y = 28;  bc.width = bw - 58;  bc.height = bh - 44
+        bc.data = [v_v, v_s]
+        bc.strokeColor = None
+        bc.groupSpacing = 10;  bc.barSpacing = 2
+        mx = max(max(v_v or [0]), max(v_s or [0]), 1)
+        bc.valueAxis.valueMin = 0
+        bc.valueAxis.valueMax = mx + max(1, mx // 4)
+        bc.valueAxis.valueStep = max(1, (mx + 1) // 4)
+        bc.valueAxis.labels.fontSize   = 7;   bc.valueAxis.labels.fillColor = GR3
+        bc.valueAxis.strokeColor       = GR2;  bc.valueAxis.gridStrokeColor  = GR2
+        bc.categoryAxis.categoryNames  = cats
+        bc.categoryAxis.labels.fontSize   = 7.5
+        bc.categoryAxis.labels.fillColor  = GR3
+        bc.categoryAxis.strokeColor       = GR2
+        bc.bars[0].fillColor = CRED
+        bc.bars[1].fillColor = GREEN
+        d.add(bc)
+        return d
+
+    def hr(c=NAVY, t=0.5, sa=8):
+        return HRFlowable(width="100%", thickness=t, color=c, spaceAfter=sa, spaceBefore=3)
+
+    def section_band(text: str, sub: str = ""):
+        rows = [[Paragraph(text, S("SB", fontSize=13, textColor=WHT, fontName="Helvetica-Bold", leading=18))]]
+        if sub:
+            rows.append([Paragraph(sub, S("SBS", fontSize=8.5, textColor=C("#a8c8e0"), leading=12))])
+        tbl = Table(rows, colWidths=[CW])
+        tbl.setStyle(TableStyle([
+            ("BACKGROUND",   (0,0),(-1,-1), NAVY),
+            ("TOPPADDING",   (0,0),(-1,-1), 10), ("BOTTOMPADDING",(0,0),(-1,-1),10),
+            ("LEFTPADDING",  (0,0),(-1,-1), 14), ("RIGHTPADDING",(0,0),(-1,-1),14),
+            ("LINEBELOW",    (0,-1),(-1,-1), 2.5, TEAL),
+        ]))
+        return tbl
+
+    def make_deco_circles(dw=90, dh=90) -> Drawing:
+        d = Drawing(dw, dh)
+        cx, cy = dw, dh * 0.5
+        for r, alpha in [(70, 0.15), (48, 0.22), (28, 0.30)]:
+            c2 = Circle(cx, cy, r)
+            c2.fillColor = None
+            c2.strokeColor = TEAL
+            c2.strokeWidth = 1.2
+            c2.strokeOpacity = alpha
+            d.add(c2)
+        return d
+
+    # ── Story ────────────────────────────────────────────────────────────────
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=M, bottomMargin=M,
+                            leftMargin=M, rightMargin=M)
+
+    story = []
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # CAPA
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    # Top bar: branding
+    top_bar = Table([[
+        Paragraph("PenteIA",
+                  S("log", fontSize=18, textColor=TEAL, fontName="Helvetica-Bold", leading=24)),
+        Paragraph("v4.0  —  Red Team Platform",
+                  S("ver", fontSize=9, textColor=C("#8fb3cc"), leading=24)),
+        Paragraph("⚠  DOCUMENTO CONFIDENCIAL",
+                  S("cnf", fontSize=8, textColor=YELLO, fontName="Helvetica-Bold", leading=24, alignment=2)),
+    ]], colWidths=[3.8*cm, 6.8*cm, CW - 10.6*cm])
+    top_bar.setStyle(TableStyle([
+        ("BACKGROUND",    (0,0),(-1,-1), NAVY2),
+        ("TOPPADDING",    (0,0),(-1,-1), 12), ("BOTTOMPADDING",(0,0),(-1,-1),12),
+        ("LEFTPADDING",   (0,0),(-1,-1), 16), ("RIGHTPADDING",(0,0),(-1,-1),16),
+        ("VALIGN",        (0,0),(-1,-1), "MIDDLE"), ("ALIGN",(2,0),(2,0),"RIGHT"),
+    ]))
+    story.append(top_bar)
+
+    # Hero: título (esquerda) + gauge + deco-circles (direita)
+    g     = make_gauge(score)
+    deco  = make_deco_circles(90, 90)
+    g_col = g.width + 18
+    deco_col = 90
+
+    title_rows = [
+        [Paragraph("RELATÓRIO DE SEGURANÇA DIGITAL",
+                   S("RT", fontSize=9, textColor=C("#8fb3cc"), fontName="Helvetica", leading=12))],
+        [Paragraph(title or "Análise Completa de Segurança",
+                   S("TIT", fontSize=20, textColor=WHT, fontName="Helvetica-Bold", leading=26))],
+        [Spacer(1, 0.22*cm)],
+        [Paragraph(f"Data: {generated_at[:10].replace('-','/')}  |  Tipo: {report_type.upper()}",
+                   S("DT", fontSize=8.5, textColor=C("#8fb3cc"), leading=12))],
+        [Spacer(1, 0.3*cm)],
+        [HRFlowable(width="78%", thickness=1.2, color=TEAL, spaceAfter=6, spaceBefore=0)],
+        [Paragraph(vtext, S("VTX", fontSize=15, textColor=C(vhex), fontName="Helvetica-Bold", leading=20))],
+        [Spacer(1, 0.18*cm)],
+        [Paragraph(vdesc, S("VD", fontSize=8.5, textColor=C("#a8c8e0"), leading=13))],
+    ]
+    t_col = CW - g_col - deco_col
+    title_cell = Table(title_rows, colWidths=[t_col])
+    title_cell.setStyle(TableStyle([
+        ("BACKGROUND",  (0,0),(-1,-1), NAVY),
+        ("TOPPADDING",  (0,0),(-1,-1), 6), ("BOTTOMPADDING",(0,0),(-1,-1),4),
+        ("LEFTPADDING", (0,0),(-1,-1), 22), ("RIGHTPADDING",(0,0),(-1,-1),10),
+        ("VALIGN",      (0,0),(-1,-1), "TOP"),
+    ]))
+    gauge_cell = Table([[g]], colWidths=[g_col])
+    gauge_cell.setStyle(TableStyle([
+        ("BACKGROUND",  (0,0),(-1,-1), NAVY),
+        ("TOPPADDING",  (0,0),(-1,-1), 14), ("BOTTOMPADDING",(0,0),(-1,-1),8),
+        ("LEFTPADDING", (0,0),(-1,-1), 6), ("RIGHTPADDING",(0,0),(-1,-1),0),
+        ("VALIGN",      (0,0),(-1,-1), "MIDDLE"),
+    ]))
+    deco_cell = Table([[deco]], colWidths=[deco_col])
+    deco_cell.setStyle(TableStyle([
+        ("BACKGROUND",  (0,0),(-1,-1), NAVY),
+        ("TOPPADDING",  (0,0),(-1,-1), 0), ("BOTTOMPADDING",(0,0),(-1,-1),0),
+        ("LEFTPADDING", (0,0),(-1,-1), 0), ("RIGHTPADDING",(0,0),(-1,-1),0),
+        ("VALIGN",      (0,0),(-1,-1), "MIDDLE"),
+    ]))
+    hero = Table([[title_cell, gauge_cell, deco_cell]], colWidths=[t_col, g_col, deco_col])
+    hero.setStyle(TableStyle([
+        ("LEFTPADDING",(0,0),(-1,-1),0), ("RIGHTPADDING",(0,0),(-1,-1),0),
+        ("TOPPADDING", (0,0),(-1,-1),0), ("BOTTOMPADDING",(0,0),(-1,-1),0),
+        ("VALIGN",     (0,0),(-1,-1),"TOP"),
+    ]))
+    story.append(hero)
+
+    # Metric cards strip
+    def mcard(lbl, val, sub, acc):
+        c = Table([
+            [Paragraph(lbl, S(f"ML{lbl[:6]}", fontSize=7.5, textColor=C("#7fb3cc"),
+                               fontName="Helvetica-Bold", leading=10))],
+            [Paragraph(str(val), S(f"MV{lbl[:6]}", fontSize=26, textColor=WHT,
+                                    fontName="Helvetica-Bold", leading=32))],
+            [Paragraph(sub, S(f"MS{lbl[:6]}", fontSize=7.5, textColor=acc, leading=10))],
+        ], colWidths=[CW / 4])
+        c.setStyle(TableStyle([
+            ("BACKGROUND",  (0,0),(-1,-1), NAVY2),
+            ("TOPPADDING",  (0,0),(-1,-1), 10), ("BOTTOMPADDING",(0,0),(-1,-1),10),
+            ("LEFTPADDING", (0,0),(-1,-1), 16), ("RIGHTPADDING",(0,0),(-1,-1),6),
+            ("LINEABOVE",   (0,0),(-1,0), 3, acc),
+        ]))
+        return c
+
+    s_acc = CRED if score >= 50 else ORANG if score >= 20 else GREEN
+    metrics = Table([[
+        mcard("SCORE DE RISCO",  f"{score:.0f}%",   "risco explorado",    s_acc),
+        mcard("VULNERABILIDADES", n_vuln,             "falhas confirmadas",  CRED if n_vuln>0 else GREEN),
+        mcard("VERIFICAÇÕES",     n_test,             "testes executados",   TEAL),
+        mcard("CONTROLES OK",     n_safe,             "proteções ativas",    GREEN),
+    ]], colWidths=[CW / 4] * 4)
+    metrics.setStyle(TableStyle([
+        ("LEFTPADDING", (0,0),(-1,-1),2), ("RIGHTPADDING",(0,0),(-1,-1),2),
+        ("TOPPADDING",  (0,0),(-1,-1),0), ("BOTTOMPADDING",(0,0),(-1,-1),0),
+    ]))
+    story.append(metrics)
+    story.append(Spacer(1, 0.3*cm))
+
+    # Barra de progresso colorida
+    if n_test > 0:
+        vp = n_vuln / n_test * 100
+        sp = n_safe / n_test * 100
+        op = max(0, 100 - vp - sp)
+        segs, wids = [], []
+        for pct, col in [(vp, CRED), (sp, GREEN), (op, ORANG)]:
+            if pct > 0.5:
+                seg = Table([[""]], colWidths=[CW * pct / 100])
+                seg.setStyle(TableStyle([
+                    ("BACKGROUND",    (0,0),(-1,-1), col),
+                    ("TOPPADDING",    (0,0),(-1,-1), 4), ("BOTTOMPADDING",(0,0),(-1,-1),4),
+                    ("LEFTPADDING",   (0,0),(-1,-1), 0), ("RIGHTPADDING",(0,0),(-1,-1),0),
+                ]))
+                segs.append(seg);  wids.append(CW * pct / 100)
+        if segs:
+            bar = Table([segs], colWidths=wids)
+            bar.setStyle(TableStyle([
+                ("LEFTPADDING", (0,0),(-1,-1),0), ("RIGHTPADDING",(0,0),(-1,-1),0),
+                ("TOPPADDING",  (0,0),(-1,-1),0), ("BOTTOMPADDING",(0,0),(-1,-1),0),
+            ]))
+            story.append(bar)
+        story.append(Paragraph(
+            f"<font color='#ef476f'>■</font> Vulnerável: {vp:.0f}%   "
+            f"<font color='#06d6a0'>■</font> Protegido: {sp:.0f}%   "
+            f"<font color='#ff6b35'>■</font> Outros: {op:.0f}%", CAP))
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # PÁG 2: ANÁLISE VISUAL
+    # ═══════════════════════════════════════════════════════════════════════════
+    story.append(PageBreak())
+    story.append(section_band("Análise Visual dos Resultados"))
+    story.append(Spacer(1, 0.25*cm))
+
+    # Gráficos lado a lado — larguras pré-calculadas para evitar overflow
+    DONUT_SEC_W = int(CW * 0.54)        # ≈266pt
+    BARS_SEC_W  = int(CW - DONUT_SEC_W - 8)  # ≈219pt
+    GAP_CHARTS  = 8
+    LEG_W       = 96
+    DONUT_PAD   = 20                    # leftPadding(12) + rightPadding(8)
+    BARS_PAD    = 22                    # leftPadding(12) + rightPadding(10)
+    DONUT_DW    = DONUT_SEC_W - DONUT_PAD - LEG_W   # donut drawing width
+    BARS_DW     = BARS_SEC_W - BARS_PAD              # bar chart drawing width
+
+    sev_vals = [
+        (len(crit), "#ef476f"), (len(high), "#ff6b35"),
+        (len(meds), "#ffd166"), (len(lows), "#00b4d8"), (len(safes), "#06d6a0"),
+    ]
+    donut_d = make_donut(sev_vals, dw=DONUT_DW, dh=DONUT_DW)
+
+    b_cats = ["Crítico", "Alto", "Médio", "Baixo", "OK"]
+    b_v    = [len(crit), len(high), len(meds), len(lows), 0]
+    b_s    = [0, 0, 0, 0, n_safe]
+    bars_d = make_bars(b_cats, b_v, b_s, bw=BARS_DW, bh=DONUT_DW)
+
+    # Legenda do donut
+    leg_items = [
+        ("Crítico",   len(crit),  "#ef476f"), ("Alto",      len(high),  "#ff6b35"),
+        ("Médio",     len(meds),  "#ffd166"), ("Baixo",     len(lows),  "#00b4d8"),
+        ("Protegido", len(safes), "#06d6a0"),
+    ]
+    leg_rows = []
+    for nm, cnt, hx in leg_items:
+        dot_d = Drawing(10, 10)
+        dot   = Rect(1, 1, 8, 8);  dot.fillColor = C(hx);  dot.strokeColor = None
+        dot_d.add(dot)
+        leg_rows.append([dot_d, Paragraph(f"{nm}  <b>{cnt}</b>",
+                                           S(f"LG{nm}", fontSize=9, textColor=DARK, leading=13))])
+    leg_tbl = Table(leg_rows, colWidths=[14, LEG_W - 14])
+    leg_tbl.setStyle(TableStyle([
+        ("TOPPADDING",   (0,0),(-1,-1),3), ("BOTTOMPADDING",(0,0),(-1,-1),3),
+        ("LEFTPADDING",  (0,0),(-1,-1),2), ("RIGHTPADDING",(0,0),(-1,-1),2),
+        ("VALIGN",       (0,0),(-1,-1),"MIDDLE"),
+    ]))
+
+    inner_donut_tbl = Table([[donut_d, leg_tbl]], colWidths=[DONUT_DW, LEG_W])
+    inner_donut_tbl.setStyle(TableStyle([
+        ("LEFTPADDING", (0,0),(-1,-1),0), ("RIGHTPADDING",(0,0),(-1,-1),0),
+        ("TOPPADDING",  (0,0),(-1,-1),0), ("BOTTOMPADDING",(0,0),(-1,-1),0),
+        ("VALIGN",      (0,0),(-1,-1),"MIDDLE"),
+    ]))
+
+    donut_sec = Table([
+        [Paragraph("Distribuição por Gravidade", H2S)],
+        [Paragraph("Proporção de achados por nível de risco.", CAP)],
+        [Spacer(1, 4)],
+        [inner_donut_tbl],
+    ], colWidths=[DONUT_SEC_W])
+    donut_sec.setStyle(TableStyle([
+        ("BACKGROUND",  (0,0),(-1,-1), GR1), ("BOX",(0,0),(-1,-1),0.5,GR2),
+        ("TOPPADDING",  (0,0),(-1,-1),12), ("BOTTOMPADDING",(0,0),(-1,-1),12),
+        ("LEFTPADDING", (0,0),(-1,-1),12), ("RIGHTPADDING",(0,0),(-1,-1),8),
+    ]))
+
+    bars_sec = Table([
+        [Paragraph("Achados por Categoria", H2S)],
+        [Paragraph("Comparativo: vulnerável vs protegido.", CAP)],
+        [Spacer(1, 4)],
+        [bars_d],
+        [Paragraph("<font color='#ef476f'>■</font> Vulnerável   "
+                   "<font color='#06d6a0'>■</font> Protegido", CAP)],
+    ], colWidths=[BARS_SEC_W])
+    bars_sec.setStyle(TableStyle([
+        ("BACKGROUND",  (0,0),(-1,-1), GR1), ("BOX",(0,0),(-1,-1),0.5,GR2),
+        ("TOPPADDING",  (0,0),(-1,-1),12), ("BOTTOMPADDING",(0,0),(-1,-1),12),
+        ("LEFTPADDING", (0,0),(-1,-1),12), ("RIGHTPADDING",(0,0),(-1,-1),10),
+    ]))
+
+    charts = Table([[donut_sec, bars_sec]], colWidths=[DONUT_SEC_W, BARS_SEC_W])
+    charts.setStyle(TableStyle([
+        ("LEFTPADDING",  (0,0),(-1,-1),0), ("TOPPADDING",(0,0),(-1,-1),0),
+        ("BOTTOMPADDING",(0,0),(-1,-1),0), ("VALIGN",(0,0),(-1,-1),"TOP"),
+        ("RIGHTPADDING", (0,0),(0,0),GAP_CHARTS), ("RIGHTPADDING",(1,0),(1,0),0),
+    ]))
+    story.append(charts)
+    story.append(Spacer(1, 0.45*cm))
+
+    # Veredicto + resumo executivo
+    story.append(section_band("Veredicto"))
+    story.append(Paragraph(vtext, vstyle))
+    story.append(Spacer(1, 3))
+    story.append(Paragraph(vdesc, BODY))
+    story.append(Spacer(1, 0.3*cm))
+
+    sum_data = [
+        ["O que foi testado",
+         f"{len(done)} sessão(ões) de ataque simulado com {n_test} verificações de segurança."],
+        ["Vulnerabilidades",
+         f"{n_vuln} confirmada(s): {len(crit)} crítica(s), {len(high)} alta(s), "
+         f"{len(meds)} média(s), {len(lows)} baixa(s)."],
+        ["Proteções ativas",
+         f"{n_safe} controle(s) funcionando (autenticação, bloqueios, criptografia)."],
+        ["Ação recomendada",
+         "Corrigir falhas da Seção 3 pela ordem de prioridade indicada."
+         if n_vuln > 0 else "Manter monitoramento periódico."],
+    ]
+    st = Table([[Paragraph(k, BOLD9), Paragraph(v, BODY)] for k, v in sum_data],
+               colWidths=[4.4*cm, CW - 4.4*cm])
+    st.setStyle(TableStyle([
+        ("ROWBACKGROUNDS", (0,0),(-1,-1), [GR1, WHT]),
+        ("FONTSIZE",       (0,0),(-1,-1), 9), ("LEADING",(0,0),(-1,-1),13),
+        ("TEXTCOLOR",      (0,0),(0,-1),  GR3),
+        ("TOPPADDING",     (0,0),(-1,-1), 7), ("BOTTOMPADDING",(0,0),(-1,-1),7),
+        ("LEFTPADDING",    (0,0),(-1,-1), 10),
+        ("GRID",           (0,0),(-1,-1), 0.3, GR2),
+        ("LINEABOVE",      (0,0),(-1,0),  2, TEAL),
+    ]))
+    story.append(st)
+
+    # Alvos testados
+    if done:
+        story.append(Spacer(1, 0.4*cm))
+        story.append(Paragraph("Servidores Testados", H2S))
+        hrow = [Paragraph(t, S(f"TH{i}", fontSize=8, textColor=WHT, fontName="Helvetica-Bold", leading=11))
+                for i, t in enumerate(["Servidor", "Testes", "Vuln.", "Proteg.", "Score", "Situação"])]
+        rows2 = [hrow]
+        for s in done:
+            ts  = s.get("techniques", [])
+            vn  = len([t for t in ts if t.get("status") == "found"])
+            bn  = len([t for t in ts if t.get("status") in ("blocked", "safe")])
+            sc2 = s.get("score", 0)
+            sc  = GREEN if sc2 < 20 else ORANG if sc2 < 50 else CRED
+            sit = "Bom" if sc2 < 20 else "Atenção" if sc2 < 50 else "Crítico"
+            rows2.append([
+                s.get("target", "—"), len(ts), vn, bn, f"{sc2:.1f}%",
+                Paragraph(sit, S(f"SIT{sc2}", fontSize=8, textColor=sc, fontName="Helvetica-Bold", leading=11)),
+            ])
+        tgt = Table(rows2, colWidths=[5.5*cm, 2*cm, 2*cm, 2.5*cm, 2.2*cm, 3*cm])
+        tgt.setStyle(TableStyle([
+            ("BACKGROUND",    (0,0),(-1,0), NAVY), ("TEXTCOLOR",(0,0),(-1,0),WHT),
+            ("FONTSIZE",      (0,0),(-1,-1), 8),
+            ("ROWBACKGROUNDS",(0,1),(-1,-1), [GR1, WHT]),
+            ("GRID",          (0,0),(-1,-1), 0.3, GR2),
+            ("ALIGN",         (1,0),(-1,-1), "CENTER"),
+            ("TOPPADDING",    (0,0),(-1,-1), 6), ("BOTTOMPADDING",(0,0),(-1,-1),6),
+            ("LEFTPADDING",   (0,0),(-1,-1), 8),
+        ]))
+        story.append(tgt)
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # PÁG 3+: VULNERABILIDADES
+    # ═══════════════════════════════════════════════════════════════════════════
+    story.append(PageBreak())
+    story.append(section_band("Vulnerabilidades Encontradas"))
+    story.append(Spacer(1, 0.2*cm))
+    story.append(Paragraph(
+        "Cada item é um problema de segurança confirmado nos testes. "
+        "Ordenados do mais grave ao menos grave, com explicação simples e orientação de correção.", BODY))
+    story.append(Spacer(1, 0.35*cm))
+
+    def sev_ord(t): return {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}.get(t.get("cvss_severity", ""), 4)
+    seen: set = set()
+    uniq: list = []
+    for t in sorted(vulns, key=sev_ord):
+        k = t.get("id", "") + t.get("_target", "")
+        if k not in seen:
+            seen.add(k);  uniq.append(t)
+
+    def vuln_card(idx, tid, nome, o_que, fix, sev, cvss, target, comp, detail=""):
+        sc2 = SEV_C.get(sev, GR3)
+        sp2 = SEV_P.get(sev, sev)
+
+        hdr = Table([[
+            Paragraph(f"{idx}. {nome}",
+                      S(f"VH{idx}", fontSize=10.5, textColor=WHT, fontName="Helvetica-Bold", leading=14)),
+            Paragraph(sp2,
+                      S(f"VS{idx}", fontSize=9, textColor=WHT, fontName="Helvetica-Bold", leading=13, alignment=2)),
+        ]], colWidths=[CW - 3.4*cm, 3.4*cm])
+        hdr.setStyle(TableStyle([
+            ("BACKGROUND",  (0,0),(-1,-1), sc2),
+            ("TOPPADDING",  (0,0),(-1,-1), 8), ("BOTTOMPADDING",(0,0),(-1,-1),8),
+            ("LEFTPADDING", (0,0),(-1,-1),12), ("RIGHTPADDING",(0,0),(-1,-1),12),
+        ]))
+
+        drows = [
+            ["O que significa:", Paragraph(o_que, BODY)],
+            ["Como corrigir:",   Paragraph(fix, FIX)],
+        ]
+        if detail:
+            drows.insert(1, ["Detalhe:", Paragraph(detail[:120] + ("…" if len(detail) > 120 else ""), CAP)])
+
+        if cvss > 0:
+            cvss_num = Paragraph(
+                f"<b>{cvss:.1f}</b><font size='9' color='grey'>/10</font>",
+                S(f"CV{idx}", fontSize=24, textColor=sc2, leading=28, alignment=2))
+            drows.append(["Gravidade:", cvss_num])
+
+        if target and target != "—":
+            drows.append(["Servidor:", Paragraph(target, BODY)])
+        if comp:
+            drows.append(["Normas:", Paragraph("  ·  ".join(comp[:3]), SML)])
+
+        body_t = Table(drows, colWidths=[3.4*cm, CW - 3.4*cm])
+        body_t.setStyle(TableStyle([
+            ("FONTSIZE",    (0,0),(-1,-1), 9), ("LEADING",(0,0),(-1,-1),13),
+            ("FONTNAME",    (0,0),(0,-1), "Helvetica-Bold"), ("TEXTCOLOR",(0,0),(0,-1),GR3),
+            ("VALIGN",      (0,0),(-1,-1), "TOP"),
+            ("TOPPADDING",  (0,0),(-1,-1), 5), ("BOTTOMPADDING",(0,0),(-1,-1),5),
+            ("LEFTPADDING", (0,0),(-1,-1),12), ("RIGHTPADDING",(0,0),(-1,-1),8),
+            ("BACKGROUND",  (0,0),(-1,-1), C("#F8F9FA")),
+            ("LINEBELOW",   (0,-1),(-1,-1), 0.5, GR2),
+        ]))
+        bordered = Table([[body_t]], colWidths=[CW])
+        bordered.setStyle(TableStyle([
+            ("LEFTPADDING",  (0,0),(-1,-1),0), ("RIGHTPADDING",(0,0),(-1,-1),0),
+            ("TOPPADDING",   (0,0),(-1,-1),0), ("BOTTOMPADDING",(0,0),(-1,-1),0),
+            ("LINEBEFORE",   (0,0),(0,-1),  6, sc2),
+        ]))
+        return KeepTogether([hdr, bordered, Spacer(1, 0.4*cm)])
+
+    if not uniq and not ag_v:
+        story.append(Paragraph(
+            "Nenhuma vulnerabilidade confirmada nesta sessão de testes. Excelente resultado!", BODY))
+
+    for i, t in enumerate(uniq, 1):
+        tid  = t.get("id", "")
+        info = _TECH_LAYMAN.get(tid, (t.get("name", tid), t.get("detail", ""), "Consultar equipe técnica."))
+        story.append(vuln_card(
+            i, tid, info[0], info[1], info[2],
+            t.get("cvss_severity", ""), t.get("cvss_score", 0),
+            t.get("_target", "—"), t.get("compliance", []) or [],
+        ))
+
+    if ag_v:
+        story.append(Paragraph("Vulnerabilidades Internas — Agente no Servidor", SECTION))
+        story.append(hr(ORANG, 2, 6))
+        story.append(Paragraph(
+            "Estas falhas foram encontradas pelo agente PenteIA rodando dentro do servidor. "
+            "Representam o risco para um atacante que já tenha obtido acesso inicial.", BODY))
+        story.append(Spacer(1, 0.3*cm))
+        for i, r in enumerate(ag_v, len(uniq) + 1):
+            tid  = r.get("technique", "")
+            info = _TECH_LAYMAN.get(tid, (r.get("name", tid), r.get("detail", ""), "Consultar equipe técnica."))
+            story.append(vuln_card(
+                i, tid, info[0], info[1], info[2],
+                r.get("cvss_severity", "Medium"), r.get("cvss_score", 0),
+                r.get("_host", "—"), [], r.get("detail", ""),
+            ))
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SEÇÃO: O QUE ESTÁ PROTEGIDO
+    # ═══════════════════════════════════════════════════════════════════════════
+    if safes:
+        story.append(PageBreak())
+        story.append(Paragraph("O Que Está Protegido", SECTION))
+        story.append(hr(GREEN, 2, 6))
+        story.append(Paragraph(
+            "Controles de segurança testados e funcionando corretamente. "
+            "Mantenha-os ativos e revise-os após qualquer atualização de sistema.", BODY))
+        story.append(Spacer(1, 0.3*cm))
+
+        seen2: set = set()
+        ok_rows = [[Paragraph(h, S(f"OH{h[:3]}", fontSize=8, textColor=WHT, fontName="Helvetica-Bold", leading=11))
+                    for h in ["Proteção", "O Que Garante", "Servidor"]]]
+        for t in safes:
+            k = t.get("id", "") + t.get("_target", "")
+            if k in seen2:
+                continue
+            seen2.add(k)
+            tid  = t.get("id", "")
+            info = _TECH_LAYMAN.get(tid, (t.get("name", tid), "Controle ativo.", ""))
+            ok_rows.append([
+                Paragraph(info[0], S(f"OKN{tid[:6]}", fontSize=8, textColor=C("#0b5345"),
+                                      fontName="Helvetica-Bold", leading=11)),
+                Paragraph(t.get("detail", "")[:80], CAP),
+                Paragraph(t.get("_target", "—"), CAP),
+            ])
+        ok = Table(ok_rows, colWidths=[5.2*cm, 8.8*cm, 3.2*cm])
+        ok.setStyle(TableStyle([
+            ("BACKGROUND",    (0,0),(-1,0), C("#0b5345")), ("TEXTCOLOR",(0,0),(-1,0),WHT),
+            ("FONTSIZE",      (0,0),(-1,-1), 8.5),
+            ("ROWBACKGROUNDS",(0,1),(-1,-1), [C("#eafaf1"), WHT]),
+            ("GRID",          (0,0),(-1,-1), 0.3, GR2),
+            ("TOPPADDING",    (0,0),(-1,-1), 7), ("BOTTOMPADDING",(0,0),(-1,-1),7),
+            ("LEFTPADDING",   (0,0),(-1,-1),10), ("VALIGN",(0,0),(-1,-1),"TOP"),
+        ]))
+        story.append(ok)
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # PLANO DE AÇÃO
+    # ═══════════════════════════════════════════════════════════════════════════
+    story.append(PageBreak())
+    story.append(Paragraph("Plano de Ação — Prioridades de Correção", SECTION))
+    story.append(hr(TEAL, 2, 6))
+    story.append(Paragraph(
+        "Corrija os itens na ordem indicada. Comece pelos CRÍTICOS, depois ALTOS, depois MÉDIOS.", BODY))
+    story.append(Spacer(1, 0.3*cm))
+
+    all_act = uniq + ag_v
+    if not all_act:
+        story.append(Paragraph(
+            "Nenhuma ação corretiva urgente identificada. Continue realizando testes periódicos.", BODY))
+
+    for pn, (lbl, bc2, its) in enumerate([
+        ("PRIORIDADE CRÍTICA — Corrigir Imediatamente",  CRED,  [t for t in all_act if t.get("cvss_severity") == "Critical"]),
+        ("PRIORIDADE ALTA — Corrigir em até 7 dias",     ORANG, [t for t in all_act if t.get("cvss_severity") == "High"]),
+        ("PRIORIDADE MÉDIA — Corrigir em até 30 dias",   YELLO, [t for t in all_act if t.get("cvss_severity") == "Medium"]),
+        ("PRIORIDADE BAIXA — Melhorias Recomendadas",    TEAL,  [t for t in all_act
+                                                                   if t.get("cvss_severity") not in ("Critical", "High", "Medium")]),
+    ], 1):
+        if not its:
+            continue
+        pb = Table([[Paragraph(f"  {pn}. {lbl}",
+                               S(f"PB{pn}", fontSize=10, textColor=WHT, fontName="Helvetica-Bold", leading=14))]],
+                   colWidths=[CW])
+        pb.setStyle(TableStyle([
+            ("BACKGROUND",  (0,0),(-1,-1), bc2),
+            ("TOPPADDING",  (0,0),(-1,-1), 8), ("BOTTOMPADDING",(0,0),(-1,-1),8),
+            ("LEFTPADDING", (0,0),(-1,-1),10), ("RIGHTPADDING",(0,0),(-1,-1),10),
+        ]))
+        story.append(pb)
+
+        ar = []
+        for t in its:
+            tid  = t.get("id", "") or t.get("technique", "")
+            info = _TECH_LAYMAN.get(tid, (t.get("name", tid), "", "Consultar equipe técnica."))
+            ar.append([Paragraph(f"• {info[0]}", BOLD9), Paragraph(info[2], FIX)])
+        at = Table(ar, colWidths=[5.5*cm, CW - 5.5*cm])
+        at.setStyle(TableStyle([
+            ("FONTSIZE",      (0,0),(-1,-1), 9),
+            ("ROWBACKGROUNDS",(0,0),(-1,-1), [GR1, WHT]),
+            ("GRID",          (0,0),(-1,-1), 0.3, GR2),
+            ("TOPPADDING",    (0,0),(-1,-1), 7), ("BOTTOMPADDING",(0,0),(-1,-1),7),
+            ("LEFTPADDING",   (0,0),(-1,-1),12), ("VALIGN",(0,0),(-1,-1),"TOP"),
+        ]))
+        story.append(at)
+        story.append(Spacer(1, 0.3*cm))
+
+    # ── Rodapé ───────────────────────────────────────────────────────────────
+    story.append(Spacer(1, 0.5*cm))
+    story.append(hr(GR3, 0.5, 6))
+    ft = Table([[
+        Paragraph("PenteIA v4.0 — Red Team Platform", CAP),
+        Paragraph(f"Gerado em {generated_at[:19].replace('T', ' ')}",
+                  S("FC", fontSize=7.5, textColor=GR3, leading=11, alignment=2)),
+    ]], colWidths=[CW / 2] * 2)
+    ft.setStyle(TableStyle([
+        ("LEFTPADDING", (0,0),(-1,-1),0), ("RIGHTPADDING",(0,0),(-1,-1),0),
+        ("TOPPADDING",  (0,0),(-1,-1),0), ("BOTTOMPADDING",(0,0),(-1,-1),0),
+    ]))
+    story.append(ft)
+    story.append(Paragraph(
+        "DOCUMENTO CONFIDENCIAL — Compartilhar somente com equipe autorizada. "
+        "Testes realizados exclusivamente em ambientes com autorização expressa.", CAP))
+
+    doc.build(story)
+    return buf.getvalue()
+
+
+def _build_docx(title: str, report_type: str, data: dict, generated_at: str) -> bytes:
+    from docx import Document
+    from docx.shared import Pt, RGBColor, Cm
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    doc = Document()
+    RED = RGBColor(0xC0, 0x39, 0x2B)
+    GRAY = RGBColor(0x55, 0x55, 0x55)
+
+    h = doc.add_heading(title, 0)
+    h.runs[0].font.color.rgb = RED
+
+    p = doc.add_paragraph(f"Tipo: {report_type}  |  Gerado em: {generated_at[:19].replace('T',' ')}")
+    p.runs[0].font.size = Pt(9)
+    p.runs[0].font.color.rgb = GRAY
+
+    doc.add_paragraph()
+
+    sims = data.get("simulations", [])
+    if sims:
+        h1 = doc.add_heading("Simulações BAS (MITRE ATT&CK)", 1)
+        h1.runs[0].font.color.rgb = RED
+        for sim in sims:
+            doc.add_heading(f"Alvo: {sim['target']} — Score: {sim['score']}%", 2)
+            doc.add_paragraph(f"Status: {sim['status']} | Técnicas: {sim['total']} | Vulnerabilidades: {sim['hits']}")
+            techs = sim.get("techniques", [])
+            if techs:
+                tbl = doc.add_table(rows=1, cols=4)
+                tbl.style = "Table Grid"
+                hdr = tbl.rows[0].cells
+                hdr[0].text = "ID MITRE"; hdr[1].text = "Técnica"; hdr[2].text = "Status"; hdr[3].text = "Detalhe"
+                for cell in hdr:
+                    for run in cell.paragraphs[0].runs:
+                        run.font.bold = True
+                for t in techs:
+                    row = tbl.add_row().cells
+                    row[0].text = t.get("id", "")
+                    row[1].text = t.get("name", "")
+                    row[2].text = t.get("status", "")
+                    row[3].text = t.get("detail", "")[:80]
+                doc.add_paragraph()
+
+    beacons = data.get("beacons", [])
+    if beacons:
+        h1 = doc.add_heading("Agentes C2 Registrados", 1)
+        h1.runs[0].font.color.rgb = RED
+        tbl = doc.add_table(rows=1, cols=4)
+        tbl.style = "Table Grid"
+        hdr = tbl.rows[0].cells
+        hdr[0].text = "Hostname"; hdr[1].text = "IP"; hdr[2].text = "Usuário"; hdr[3].text = "Status"
+        for b in beacons:
+            row = tbl.add_row().cells
+            row[0].text = b["hostname"]; row[1].text = b["ip"]; row[2].text = b["user"]; row[3].text = b["status"]
+        doc.add_paragraph()
+
+    p = doc.add_paragraph("Confidencial — uso exclusivo em ambientes autorizados. PenteIA v4.0 © 2026")
+    p.runs[0].font.size = Pt(8)
+    p.runs[0].font.color.rgb = GRAY
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def _build_xlsx(title: str, report_type: str, data: dict, generated_at: str) -> bytes:
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    wb = openpyxl.Workbook()
+    RED_FILL = PatternFill("solid", fgColor="C0392B")
+    GRAY_FILL = PatternFill("solid", fgColor="555555")
+    LGRAY_FILL = PatternFill("solid", fgColor="F5F5F5")
+    WHITE_FONT = Font(color="FFFFFF", bold=True)
+    thin = Border(left=Side(style="thin"), right=Side(style="thin"), top=Side(style="thin"), bottom=Side(style="thin"))
+
+    # Sheet 1: BAS Simulations
+    ws = wb.active
+    ws.title = "BAS Simulações"
+    ws.append([f"PenteIA v4.0 — {title}"])
+    ws["A1"].font = Font(bold=True, size=14, color="C0392B")
+    ws.append([f"Tipo: {report_type} | Gerado: {generated_at[:19].replace('T',' ')}"])
+    ws.append([])
+
+    ws.append(["Alvo", "Score (%)", "Status", "Hits", "Total Técnicas", "Data"])
+    for cell in ws[4]:
+        cell.fill = RED_FILL; cell.font = WHITE_FONT; cell.alignment = Alignment(horizontal="center")
+    for sim in data.get("simulations", []):
+        ws.append([sim["target"], sim["score"], sim["status"], sim["hits"], sim["total"], sim["created_at"][:19]])
+
+    ws.append([])
+    ws.append(["ID MITRE", "Técnica", "Status", "Detalhe", "HTTP Status", "Alvo"])
+    hdr_row = ws.max_row
+    for cell in ws[hdr_row]:
+        cell.fill = GRAY_FILL; cell.font = WHITE_FONT
+    for sim in data.get("simulations", []):
+        for t in sim.get("techniques", []):
+            ws.append([t.get("id",""), t.get("name",""), t.get("status",""), t.get("detail",""), t.get("http_status",""), sim["target"]])
+
+    for col in range(1, 7):
+        ws.column_dimensions[get_column_letter(col)].width = [15, 30, 10, 50, 12, 20][col-1]
+
+    # Sheet 2: C2 Beacons
+    ws2 = wb.create_sheet("C2 Beacons")
+    ws2.append(["Hostname", "IP", "Usuário", "Status"])
+    for cell in ws2[1]:
+        cell.fill = RED_FILL; cell.font = WHITE_FONT
+    for b in data.get("beacons", []):
+        ws2.append([b["hostname"], b["ip"], b["user"], b["status"]])
+    for col in range(1, 5):
+        ws2.column_dimensions[get_column_letter(col)].width = [25, 15, 20, 10][col-1]
+
+    # Sheet 3: Listeners
+    ws3 = wb.create_sheet("C2 Listeners")
+    ws3.append(["Nome", "Host", "Porta", "Protocolo"])
+    for cell in ws3[1]:
+        cell.fill = GRAY_FILL; cell.font = WHITE_FONT
+    for l in data.get("listeners", []):
+        ws3.append([l["name"], l["host"], l["port"], l["protocol"]])
+
+    # Sheet 4: Payloads
+    ws4 = wb.create_sheet("Payloads")
+    ws4.append(["Nome", "Tipo", "Tamanho"])
+    for cell in ws4[1]:
+        cell.fill = GRAY_FILL; cell.font = WHITE_FONT
+    for p in data.get("payloads", []):
+        ws4.append([p["name"], p["type"], p["size"]])
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 @app.post("/api/reporting/generate")
 async def generate_report(
     req: ReportCreateRequest,
     current_user: User = Depends(get_current_user), db: Session = Depends(get_db)
 ):
+    generated_at = datetime.utcnow().isoformat()
+    report_data = _collect_report_data(current_user.id, db)
+    report_data["generated_at"] = generated_at
+    report_data["type"] = req.report_type
+    report_data["title"] = req.title
+
     report = Report(
         user_id=current_user.id, title=req.title, type=req.report_type, format=req.format,
-        json_data={"generated_at": datetime.utcnow().isoformat(), "type": req.report_type, "title": req.title}
+        json_data=report_data
     )
     db.add(report)
     db.commit()
-    _operation_logs.append({"module": "SYSTEM", "action": "Relatório gerado", "details": req.title, "timestamp": datetime.utcnow().isoformat()})
+    _operation_logs.append({"module": "SYSTEM", "action": "Relatório gerado", "details": req.title, "timestamp": generated_at})
     return {"id": report.id, "message": "Relatório gerado"}
 
 @app.get("/api/reporting/reports")
@@ -471,12 +1998,33 @@ async def download_report(report_id: str, current_user: User = Depends(get_curre
     report = db.query(Report).filter(Report.id == report_id, Report.user_id == current_user.id).first()
     if not report:
         raise HTTPException(status_code=404, detail="Relatório não encontrado")
-    content = json.dumps(report.json_data or {}, indent=2, ensure_ascii=False).encode("utf-8")
-    return StreamingResponse(
-        io.BytesIO(content),
-        media_type="application/json",
-        headers={"Content-Disposition": f'attachment; filename="report-{report.id}.json"'},
-    )
+
+    fmt = (report.format or "pdf").lower()
+    data = report.json_data or {}
+    title = report.title or "Relatório"
+    generated_at = data.get("generated_at", datetime.utcnow().isoformat())
+
+    try:
+        if fmt in ("docx", "word"):
+            content = _build_docx(title, report.type or "", data, generated_at)
+            safe = _re.sub(r"[^a-zA-Z0-9_-]", "_", title)[:40]
+            return StreamingResponse(io.BytesIO(content), media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                     headers={"Content-Disposition": f'attachment; filename="{safe}.docx"'})
+        elif fmt in ("xlsx", "excel"):
+            content = _build_xlsx(title, report.type or "", data, generated_at)
+            safe = _re.sub(r"[^a-zA-Z0-9_-]", "_", title)[:40]
+            return StreamingResponse(io.BytesIO(content), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                     headers={"Content-Disposition": f'attachment; filename="{safe}.xlsx"'})
+        else:  # pdf (default)
+            content = _build_pdf(title, report.type or "", data, generated_at)
+            safe = _re.sub(r"[^a-zA-Z0-9_-]", "_", title)[:40]
+            return StreamingResponse(io.BytesIO(content), media_type="application/pdf",
+                                     headers={"Content-Disposition": f'attachment; filename="{safe}.pdf"'})
+    except Exception as e:
+        # fallback to JSON if generation fails
+        content = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
+        return StreamingResponse(io.BytesIO(content), media_type="application/json",
+                                 headers={"Content-Disposition": f'attachment; filename="report-{report.id}.json"'})
 
 @app.delete("/api/reporting/reports/{report_id}")
 async def delete_report(report_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -733,12 +2281,15 @@ async def stop_ddos(test_id: str, current_user: User = Depends(get_current_user)
         res = entry['result']
         executor = entry.get('executor')
         vps_pid = res.get('vps_pid')
-        if executor and vps_pid:
+        if executor and vps_pid and hasattr(executor, 'kill_test'):
             await asyncio.to_thread(executor.kill_test, vps_pid)
             res['status'] = 'stopped'
             return {"message": f"Processo VPS PID {vps_pid} encerrado"}
+        # Local executor — sinaliza parada via stop_event e fecha sockets
+        if executor and hasattr(executor, 'stop'):
+            executor.stop()
         res['status'] = 'stopped'
-        return {"message": "Teste SSH marcado como parado (PID ainda não disponível)"}
+        return {"message": "Executor local parado — sockets fechados"}
     ddos_engine.stop_test(test_id)
     return {"message": "Teste DDoS parado"}
 
@@ -1137,7 +2688,7 @@ async def admin_delete_user(
 
 class CampaignRequest(BaseModel):
     target_host: str
-    target_port: int = 80
+    target_port: Optional[int] = None  # None = auto-scan de portas
     methods: List[str] = ["http_flood", "slowloris", "udp_flood"]
     duration_per_method: int = 30
     threads: int = 8
@@ -1145,6 +2696,35 @@ class CampaignRequest(BaseModel):
     run_recon: bool = True
 
 _campaign_store: dict = {}  # campaign_id -> campaign state dict
+
+COMMON_WEB_PORTS = [
+    21, 22, 25, 53, 80, 443, 3000, 3001, 4000, 5000,
+    8000, 8001, 8008, 8080, 8081, 8082, 8443, 8888,
+    9000, 9001, 9090, 9443, 10000,
+]
+
+def _scan_ports(host: str, ports: list, timeout: float = 1.5) -> list:
+    resolved = _socket.gethostbyname(host)
+    open_ports = []
+    lock = threading.Lock()
+
+    def check(port):
+        try:
+            s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+            s.settimeout(timeout)
+            if s.connect_ex((resolved, port)) == 0:
+                with lock:
+                    open_ports.append(port)
+            s.close()
+        except Exception:
+            pass
+
+    threads = [threading.Thread(target=check, args=(p,), daemon=True) for p in ports]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=timeout + 1.0)
+    return sorted(open_ports)
 
 def _probe_latency(host: str, port: int, timeout: float = 4.0) -> dict:
     """Faz uma requisição HTTP simples e retorna latência e status."""
@@ -1191,46 +2771,68 @@ def _run_campaign(campaign_id: str, req: CampaignRequest):
     state = _campaign_store[campaign_id]
     state["status"] = "running"
     results = []
+    effective_port = req.target_port  # determinado durante recon quando None
 
     try:
         # ── Fase 0: Recon ────────────────────────────────────────────────────
-        recon_data = {"host": req.target_host, "port": req.target_port}
+        recon_data = {"host": req.target_host}
+
+        # Resolve IP sempre
+        try:
+            resolved = _socket.gethostbyname(req.target_host)
+            recon_data["resolved_ip"] = resolved
+        except Exception:
+            recon_data["resolved_ip"] = req.target_host
+
+        # Port scan automático se porta não especificada
+        if req.target_port is None:
+            state["phase"] = "recon"
+            state["phase_label"] = f"Escaneando {len(COMMON_WEB_PORTS)} portas..."
+            state["recon"] = recon_data
+            open_ports = _scan_ports(req.target_host, COMMON_WEB_PORTS)
+            recon_data["open_ports"] = open_ports
+            state["recon"] = recon_data
+
+            if not open_ports:
+                state["status"] = "error"
+                state["error"] = f"Nenhuma porta aberta encontrada ({len(COMMON_WEB_PORTS)} portas escaneadas)"
+                return
+
+            WEB_PRIORITY = [80, 443, 8080, 8443, 3000, 8000, 5000, 3001, 4000,
+                            8001, 8008, 8081, 8082, 8888, 9000, 9001, 9090, 9443, 10000]
+            effective_port = next((p for p in WEB_PRIORITY if p in open_ports), open_ports[0])
+            recon_data["port"] = effective_port
+            state["target"] = f"{req.target_host}:{effective_port}"
+        else:
+            effective_port = req.target_port
+            recon_data["port"] = effective_port
+
         if req.run_recon:
             state["phase"] = "recon"
-            state["phase_label"] = "Reconhecimento do alvo"
-            try:
-                resolved = _socket.gethostbyname(req.target_host)
-                recon_data["resolved_ip"] = resolved
-            except Exception:
-                recon_data["resolved_ip"] = req.target_host
+            state["phase_label"] = f"Analisando porta {effective_port}..."
 
-            # Baseline latência
-            probes = [_probe_latency(req.target_host, req.target_port) for _ in range(3)]
+            probes = [_probe_latency(req.target_host, effective_port) for _ in range(3)]
             ok_probes = [p for p in probes if p["ok"]]
             baseline = int(sum(p["ms"] for p in ok_probes) / len(ok_probes)) if ok_probes else 9999
 
-            # Headers HTTP
             try:
-                resp = _requests.get(f"http://{req.target_host}:{req.target_port}/", timeout=5, allow_redirects=False)
+                resp = _requests.get(f"http://{req.target_host}:{effective_port}/", timeout=5, allow_redirects=False)
                 recon_data["server_header"] = resp.headers.get("Server", "n/d")
                 recon_data["status_code"] = resp.status_code
-                csp = resp.headers.get("Content-Security-Policy", "")
-                recon_data["has_csp"] = bool(csp)
+                recon_data["has_csp"] = bool(resp.headers.get("Content-Security-Policy", ""))
                 recon_data["has_hsts"] = bool(resp.headers.get("Strict-Transport-Security", ""))
                 recon_data["has_ratelimit"] = bool(resp.headers.get("X-RateLimit-Limit") or resp.headers.get("Retry-After"))
             except Exception:
                 recon_data["server_header"] = "n/d"
 
             recon_data["baseline_ms"] = baseline
-            state["recon"] = recon_data
-
         else:
-            # Sem recon, mede baseline rapidamente
-            probes = [_probe_latency(req.target_host, req.target_port) for _ in range(2)]
+            probes = [_probe_latency(req.target_host, effective_port) for _ in range(2)]
             ok_probes = [p for p in probes if p["ok"]]
             baseline = int(sum(p["ms"] for p in ok_probes) / len(ok_probes)) if ok_probes else 9999
             recon_data["baseline_ms"] = baseline
-            state["recon"] = recon_data
+
+        state["recon"] = recon_data
 
         # ── Fases de ataque ──────────────────────────────────────────────────
         for idx, method in enumerate(req.methods):
@@ -1241,28 +2843,26 @@ def _run_campaign(campaign_id: str, req: CampaignRequest):
             executor = LocalFloodExecutor()
             thread, result_ref = executor.start_test(
                 target_host=req.target_host,
-                target_port=req.target_port,
+                target_port=effective_port,
                 method=method,
                 duration=req.duration_per_method,
                 pps=req.pps,
                 threads=req.threads,
             )
 
-            # Sonda latência a cada 2s durante o ataque
             probes_during = []
             elapsed = 0
             while elapsed < req.duration_per_method:
                 time.sleep(2)
                 elapsed += 2
-                p = _probe_latency(req.target_host, req.target_port, timeout=5.0)
+                p = _probe_latency(req.target_host, effective_port, timeout=5.0)
                 p["elapsed"] = elapsed
                 probes_during.append(p)
                 state["live_probe"] = p
 
-            thread.join(timeout=5)  # aguarda thread finalizar
+            thread.join(timeout=5)
             final_metrics = result_ref
 
-            # Calcula efetividade
             failed   = [p for p in probes_during if not p["ok"] or p["code"] in (429, 503, 504)]
             ok_d     = [p for p in probes_during if p["ok"] and p["code"] not in (429, 503, 504)]
             avg_lat  = int(sum(p["ms"] for p in ok_d) / len(ok_d)) if ok_d else int(req.duration_per_method * 1000)
@@ -1274,6 +2874,7 @@ def _run_campaign(campaign_id: str, req: CampaignRequest):
             result = {
                 "method":          method,
                 "method_label":    method.replace("_", " ").title(),
+                "port":            effective_port,
                 "requests_sent":   final_metrics.get("requests") or final_metrics.get("packets") or 0,
                 "errors":          final_metrics.get("errors", 0),
                 "baseline_ms":     recon_data["baseline_ms"],
@@ -1288,12 +2889,12 @@ def _run_campaign(campaign_id: str, req: CampaignRequest):
             results.append(result)
             state["results"] = results[:]
 
-        # ── Fase final: relatório ─────────────────────────────────────────────
+        # ── Relatório ────────────────────────────────────────────────────────
         state["phase"] = "report"
         state["phase_label"] = "Gerando relatorio"
         best = max(results, key=lambda r: r["effectiveness"]) if results else None
         state["report"] = {
-            "target":          f"{req.target_host}:{req.target_port}",
+            "target":          state["target"],
             "total_methods":   len(results),
             "total_duration":  len(results) * req.duration_per_method,
             "recon":           state.get("recon", {}),
@@ -1314,7 +2915,7 @@ def _run_campaign(campaign_id: str, req: CampaignRequest):
     _operation_logs.append({
         "module": "Campaign",
         "action": "Campanha automatica",
-        "details": f"{req.target_host}:{req.target_port} — {len(req.methods)} metodos",
+        "details": f"{req.target_host}:{effective_port} — {len(req.methods)} metodos",
         "timestamp": datetime.utcnow().isoformat(),
     })
 
@@ -1328,6 +2929,8 @@ async def campaign_start(req: CampaignRequest, current_user: User = Depends(get_
         raise HTTPException(status_code=400, detail="Selecione ao menos um metodo")
     if req.duration_per_method < 10 or req.duration_per_method > 120:
         raise HTTPException(status_code=400, detail="Duracao por metodo: 10-120s")
+    if req.target_port is not None and not (1 <= req.target_port <= 65535):
+        raise HTTPException(status_code=400, detail="Porta invalida (1-65535)")
 
     try:
         resolved = await asyncio.to_thread(_socket.gethostbyname, req.target_host)
@@ -1335,12 +2938,13 @@ async def campaign_start(req: CampaignRequest, current_user: User = Depends(get_
         raise HTTPException(status_code=400, detail=f"Host nao encontrado: {req.target_host}")
 
     campaign_id = f"camp_{int(time.time() * 1000)}_{os.urandom(3).hex()}"
+    initial_target = f"{req.target_host}:{req.target_port}" if req.target_port else req.target_host
     _campaign_store[campaign_id] = {
         "id":          campaign_id,
         "status":      "starting",
         "phase":       "init",
         "phase_label": "Iniciando campanha",
-        "target":      f"{req.target_host}:{req.target_port}",
+        "target":      initial_target,
         "methods":     req.methods,
         "results":     [],
         "recon":       {},
@@ -1373,6 +2977,1487 @@ async def campaign_delete(campaign_id: str, current_user: User = Depends(get_cur
         raise HTTPException(status_code=404, detail="Campanha nao encontrada")
     del _campaign_store[campaign_id]
     return {"message": "Campanha removida"}
+
+
+# ── Agent System ─────────────────────────────────────────────────────────────
+
+class AgentRegisterRequest(BaseModel):
+    user_id: str
+    hostname: str
+    ip: str = ""
+    os_info: str = ""
+    username: str = ""
+    python_version: str = ""
+
+class AgentExecuteRequest(BaseModel):
+    techniques: List[str]
+
+class AgentTaskResultRequest(BaseModel):
+    result: dict
+
+class AgentBatchResultRequest(BaseModel):
+    results: List[dict]
+
+def _validate_agent_token(agent_id: str, token: str, db: Session) -> PenteiaAgent:
+    """Validate agent token — if no token stored yet (legacy), accept and set it."""
+    agent = db.query(PenteiaAgent).filter(PenteiaAgent.id == agent_id).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agente não encontrado")
+    if agent.agent_token and agent.agent_token != token:
+        raise HTTPException(status_code=401, detail="Token de agente inválido")
+    if not agent.agent_token and token:
+        agent.agent_token = token
+        db.commit()
+    return agent
+
+
+@app.post("/api/agents/register")
+async def agent_register(req: AgentRegisterRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == req.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado")
+    import uuid as _uuid_mod
+    agent_token = str(_uuid_mod.uuid4()).replace("-", "")
+    agent = PenteiaAgent(
+        user_id=req.user_id,
+        hostname=req.hostname,
+        ip=req.ip,
+        os_info=req.os_info,
+        username=req.username,
+        python_version=req.python_version,
+        agent_token=agent_token,
+        last_seen=datetime.utcnow(),
+        status="active",
+    )
+    db.add(agent)
+    db.commit()
+    db.refresh(agent)
+    return {"agent_id": agent.id, "agent_token": agent_token, "message": "Agente registrado com sucesso"}
+
+@app.get("/api/agents")
+async def agents_list(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    agents = db.query(PenteiaAgent).filter(PenteiaAgent.user_id == current_user.id).order_by(PenteiaAgent.last_seen.desc()).all()
+    now = datetime.utcnow()
+    result = []
+    for a in agents:
+        delta = (now - a.last_seen).total_seconds()
+        status = "active" if delta < 60 else ("idle" if delta < 300 else "lost")
+        result.append({
+            "id": a.id, "hostname": a.hostname, "ip": a.ip,
+            "os_info": a.os_info, "username": a.username,
+            "python_version": a.python_version,
+            "last_seen": a.last_seen.isoformat(),
+            "last_seen_secs": int(delta),
+            "status": status,
+            "created_at": a.created_at.isoformat(),
+        })
+    return {"agents": result}
+
+@app.post("/api/agents/{agent_id}/execute")
+async def agent_execute(
+    agent_id: str,
+    req: AgentExecuteRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    agent = db.query(PenteiaAgent).filter(
+        PenteiaAgent.id == agent_id,
+        PenteiaAgent.user_id == current_user.id,
+    ).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agente não encontrado")
+    tasks = []
+    for tech in req.techniques:
+        t = AgentTask(agent_id=agent_id, technique=tech, status="pending")
+        db.add(t)
+        tasks.append(t)
+    db.commit()
+    return {"queued": len(tasks), "task_ids": [t.id for t in tasks]}
+
+@app.get("/api/agents/{agent_id}/tasks")
+async def agent_get_tasks(agent_id: str, x_agent_token: Optional[str] = Header(None), db: Session = Depends(get_db)):
+    agent = _validate_agent_token(agent_id, x_agent_token or "", db)
+    tasks = db.query(AgentTask).filter(
+        AgentTask.agent_id == agent_id,
+        AgentTask.status == "pending",
+    ).all()
+    for t in tasks:
+        t.status = "running"
+    db.commit()
+    return {
+        "tasks": [{"id": t.id, "technique": t.technique} for t in tasks]
+    }
+
+@app.post("/api/agents/tasks/{task_id}/result")
+async def agent_task_result(task_id: str, req: AgentTaskResultRequest, x_agent_token: Optional[str] = Header(None), db: Session = Depends(get_db)):
+    task = db.query(AgentTask).filter(AgentTask.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task não encontrada")
+    _validate_agent_token(task.agent_id, x_agent_token or "", db)
+    task.result = req.result
+    task.status = "completed"
+    task.completed_at = datetime.utcnow()
+    db.commit()
+    return {"message": "Resultado salvo"}
+
+@app.post("/api/agents/{agent_id}/heartbeat")
+async def agent_heartbeat(agent_id: str, x_agent_token: Optional[str] = Header(None), db: Session = Depends(get_db)):
+    agent = _validate_agent_token(agent_id, x_agent_token or "", db)
+    agent.last_seen = datetime.utcnow()
+    agent.status = "active"
+    db.commit()
+    return {"message": "ok"}
+
+@app.post("/api/agents/{agent_id}/batch-result")
+async def agent_batch_result(
+    agent_id: str,
+    req: AgentBatchResultRequest,
+    x_agent_token: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+):
+    agent = _validate_agent_token(agent_id, x_agent_token or "", db)
+    agent.last_seen = datetime.utcnow()
+    for r in req.results:
+        tech = r.get("technique", "")
+        if not tech:
+            continue
+        existing = db.query(AgentTask).filter(
+            AgentTask.agent_id == agent_id,
+            AgentTask.technique == tech,
+            AgentTask.status.in_(["pending", "running"]),
+        ).first()
+        if existing:
+            existing.result = r
+            existing.status = "completed"
+            existing.completed_at = datetime.utcnow()
+        else:
+            t = AgentTask(
+                agent_id=agent_id,
+                technique=tech,
+                status="completed",
+                result=r,
+                completed_at=datetime.utcnow(),
+            )
+            db.add(t)
+    db.commit()
+    return {"message": "Batch salvo", "count": len(req.results)}
+
+@app.get("/api/agents/{agent_id}/results")
+async def agent_results(
+    agent_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    agent = db.query(PenteiaAgent).filter(
+        PenteiaAgent.id == agent_id,
+        PenteiaAgent.user_id == current_user.id,
+    ).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agente não encontrado")
+    tasks = db.query(AgentTask).filter(
+        AgentTask.agent_id == agent_id,
+        AgentTask.status == "completed",
+    ).order_by(AgentTask.completed_at.desc()).all()
+    return {
+        "agent": {
+            "id": agent.id, "hostname": agent.hostname,
+            "ip": agent.ip, "os_info": agent.os_info,
+        },
+        "results": [
+            {
+                "task_id":       t.id,
+                "technique":     t.technique,
+                "completed_at":  t.completed_at.isoformat() if t.completed_at else None,
+                **t.result,
+            }
+            for t in tasks
+        ],
+    }
+
+@app.delete("/api/agents/{agent_id}")
+async def agent_delete(
+    agent_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    agent = db.query(PenteiaAgent).filter(
+        PenteiaAgent.id == agent_id,
+        PenteiaAgent.user_id == current_user.id,
+    ).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agente não encontrado")
+    db.delete(agent)
+    db.commit()
+    return {"message": "Agente removido"}
+
+
+# ── Webhook helpers ──────────────────────────────────────────────────────────
+
+def _fire_webhooks_sync(user_id: str, event: str, payload: dict):
+    """Dispara webhooks configurados para o user em thread separada."""
+    def _do():
+        db3 = SessionLocal()
+        try:
+            configs = db3.query(WebhookConfig).filter(
+                WebhookConfig.user_id == user_id,
+                WebhookConfig.enabled == True,
+            ).all()
+            for cfg in configs:
+                if event not in (cfg.events or []):
+                    continue
+                body = json.dumps(payload).encode()
+                headers = {"Content-Type": "application/json", "X-PenteIA-Event": event}
+                if cfg.secret:
+                    sig = _hmac.new(cfg.secret.encode(), body, _hashlib.sha256).hexdigest()
+                    headers["X-PenteIA-Signature"] = f"sha256={sig}"
+                try:
+                    _requests.post(cfg.url, data=body, headers=headers, timeout=8)
+                except Exception:
+                    pass
+        finally:
+            db3.close()
+    threading.Thread(target=_do, daemon=True).start()
+
+
+# ── Scheduled Scans ───────────────────────────────────────────────────────────
+
+def _interval_days(interval: str) -> int:
+    return {"daily": 1, "weekly": 7, "monthly": 30}.get(interval, 7)
+
+
+def _run_scheduled_sim(scan_id: str):
+    """Função chamada pelo APScheduler para executar simulação agendada."""
+    db4 = SessionLocal()
+    try:
+        scan = db4.query(ScheduledScan).filter(ScheduledScan.id == scan_id).first()
+        if not scan or not scan.enabled:
+            return
+        playbook = db4.query(Playbook).filter(Playbook.id == scan.playbook_id).first()
+        if not playbook:
+            return
+        sim = Simulation(
+            user_id=scan.user_id,
+            playbook_id=scan.playbook_id,
+            target=scan.target,
+            status="running",
+            score=0.0,
+        )
+        db4.add(sim)
+        db4.commit()
+        db4.refresh(sim)
+        threading.Thread(
+            target=_bas_run,
+            args=(sim.id, playbook.name, scan.target, playbook.severity, playbook.techniques),
+            daemon=True,
+        ).start()
+        # Atualizar next_run
+        days = _interval_days(scan.interval)
+        scan.next_run = datetime.utcnow() + timedelta(days=days)
+        db4.commit()
+    finally:
+        db4.close()
+
+
+@app.get("/api/schedule")
+async def list_schedules(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    scans = db.query(ScheduledScan).filter(ScheduledScan.user_id == current_user.id).all()
+    return {"schedules": [
+        {
+            "id": s.id,
+            "playbook_id": s.playbook_id,
+            "target": s.target,
+            "interval": s.interval,
+            "next_run": s.next_run.isoformat() if s.next_run else None,
+            "last_run": s.last_run.isoformat() if s.last_run else None,
+            "enabled": s.enabled,
+            "created_at": s.created_at.isoformat(),
+        }
+        for s in scans
+    ]}
+
+
+@app.post("/api/schedule")
+async def create_schedule(
+    req: ScheduleCreateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    playbook = db.query(Playbook).filter(
+        Playbook.id == req.playbook_id, Playbook.user_id == current_user.id
+    ).first()
+    if not playbook:
+        raise HTTPException(status_code=404, detail="Playbook não encontrado")
+    if req.interval not in ("daily", "weekly", "monthly"):
+        raise HTTPException(status_code=400, detail="Intervalo inválido. Use: daily, weekly, monthly")
+
+    days = _interval_days(req.interval)
+    next_run = datetime.utcnow() + timedelta(days=days)
+
+    scan = ScheduledScan(
+        user_id=current_user.id,
+        playbook_id=req.playbook_id,
+        target=req.target,
+        interval=req.interval,
+        next_run=next_run,
+        enabled=True,
+    )
+    db.add(scan)
+    db.commit()
+    db.refresh(scan)
+
+    if _scheduler:
+        _scheduler.add_job(
+            _run_scheduled_sim,
+            trigger="interval",
+            days=days,
+            id=scan.id,
+            args=[scan.id],
+            replace_existing=True,
+        )
+
+    _operation_logs.append({
+        "module": "BAS", "action": "Simulação agendada",
+        "details": f"{playbook.name} → {req.target} ({req.interval})",
+        "timestamp": datetime.utcnow().isoformat(),
+    })
+    return {"id": scan.id, "next_run": next_run.isoformat(), "message": "Agendamento criado"}
+
+
+@app.patch("/api/schedule/{scan_id}")
+async def toggle_schedule(
+    scan_id: str,
+    req: ScheduleToggleRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    scan = db.query(ScheduledScan).filter(
+        ScheduledScan.id == scan_id, ScheduledScan.user_id == current_user.id
+    ).first()
+    if not scan:
+        raise HTTPException(status_code=404, detail="Agendamento não encontrado")
+    scan.enabled = req.enabled
+    db.commit()
+    if _scheduler:
+        if req.enabled:
+            days = _interval_days(scan.interval)
+            _scheduler.add_job(_run_scheduled_sim, trigger="interval", days=days,
+                               id=scan.id, args=[scan.id], replace_existing=True)
+        else:
+            try:
+                _scheduler.remove_job(scan.id)
+            except Exception:
+                pass
+    return {"id": scan_id, "enabled": req.enabled}
+
+
+@app.delete("/api/schedule/{scan_id}")
+async def delete_schedule(
+    scan_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    scan = db.query(ScheduledScan).filter(
+        ScheduledScan.id == scan_id, ScheduledScan.user_id == current_user.id
+    ).first()
+    if not scan:
+        raise HTTPException(status_code=404, detail="Agendamento não encontrado")
+    if _scheduler:
+        try:
+            _scheduler.remove_job(scan.id)
+        except Exception:
+            pass
+    db.delete(scan)
+    db.commit()
+    return {"message": "Agendamento removido"}
+
+
+# ── Webhooks ──────────────────────────────────────────────────────────────────
+
+@app.get("/api/webhooks")
+async def list_webhooks(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    hooks = db.query(WebhookConfig).filter(WebhookConfig.user_id == current_user.id).all()
+    return {"webhooks": [
+        {
+            "id": h.id,
+            "name": h.name,
+            "url": h.url[:40] + "..." if len(h.url) > 40 else h.url,
+            "events": h.events,
+            "enabled": h.enabled,
+            "has_secret": bool(h.secret),
+            "created_at": h.created_at.isoformat(),
+        }
+        for h in hooks
+    ]}
+
+
+@app.post("/api/webhooks")
+async def create_webhook(
+    req: WebhookCreateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    hook = WebhookConfig(
+        user_id=current_user.id,
+        name=req.name,
+        url=req.url,
+        events=req.events,
+        secret=req.secret,
+        enabled=True,
+    )
+    db.add(hook)
+    db.commit()
+    db.refresh(hook)
+    _operation_logs.append({"module": "ADMIN", "action": "Webhook criado", "details": req.name, "timestamp": datetime.utcnow().isoformat()})
+    return {"id": hook.id, "message": "Webhook criado"}
+
+
+@app.post("/api/webhooks/{hook_id}/test")
+async def test_webhook(
+    hook_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    hook = db.query(WebhookConfig).filter(
+        WebhookConfig.id == hook_id, WebhookConfig.user_id == current_user.id
+    ).first()
+    if not hook:
+        raise HTTPException(status_code=404, detail="Webhook não encontrado")
+    test_payload = {
+        "event": "test",
+        "message": "PenteIA webhook test ping",
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+    body = json.dumps(test_payload).encode()
+    headers = {"Content-Type": "application/json", "X-PenteIA-Event": "test"}
+    if hook.secret:
+        sig = _hmac.new(hook.secret.encode(), body, _hashlib.sha256).hexdigest()
+        headers["X-PenteIA-Signature"] = f"sha256={sig}"
+    try:
+        r = _requests.post(hook.url, data=body, headers=headers, timeout=8)
+        return {"status": r.status_code, "message": f"Webhook respondeu com HTTP {r.status_code}"}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Falha ao contactar webhook: {e}")
+
+
+@app.delete("/api/webhooks/{hook_id}")
+async def delete_webhook(
+    hook_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    hook = db.query(WebhookConfig).filter(
+        WebhookConfig.id == hook_id, WebhookConfig.user_id == current_user.id
+    ).first()
+    if not hook:
+        raise HTTPException(status_code=404, detail="Webhook não encontrado")
+    db.delete(hook)
+    db.commit()
+    return {"message": "Webhook removido"}
+
+
+# ── Attack Path Graph ─────────────────────────────────────────────────────────
+
+@app.get("/api/bas/simulations/{sim_id}/graph")
+async def simulation_graph(
+    sim_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    sim = db.query(Simulation).filter(
+        Simulation.id == sim_id, Simulation.user_id == current_user.id
+    ).first()
+    if not sim:
+        raise HTTPException(status_code=404, detail="Simulação não encontrada")
+
+    res = sim.results or {}
+    techniques = res.get("techniques", [])
+    target = res.get("target", sim.target)
+
+    nodes = [
+        {"id": "attacker", "type": "input", "data": {"label": "Atacante (Internet)", "type": "attacker"}, "position": {"x": 0, "y": 200}},
+        {"id": "target", "type": "output", "data": {"label": target, "type": "server"}, "position": {"x": 800, "y": 200}},
+    ]
+    edges = []
+
+    # Agrupar por tática para posicionamento em colunas
+    tactic_order = [
+        "RECONNAISSANCE", "INITIAL_ACCESS", "EXECUTION", "PRIVILEGE_ESCALATION",
+        "DEFENSE_EVASION", "CREDENTIAL_ACCESS", "LATERAL_MOVEMENT", "COLLECTION",
+        "EXFILTRATION", "IMPACT",
+    ]
+    by_tactic: dict = {}
+    for t in techniques:
+        tac = t.get("tactic", "UNKNOWN")
+        by_tactic.setdefault(tac, []).append(t)
+
+    col_x = 160
+    for tac in tactic_order:
+        tac_techs = by_tactic.pop(tac, [])
+        if not tac_techs:
+            continue
+        n_in_col = len(tac_techs)
+        for i, t in enumerate(tac_techs):
+            tid = t.get("id", f"T_{i}")
+            node_id = f"{tid}_{col_x}"
+            status = t.get("status", "unknown")
+            color = "#e74c3c" if status == "found" else "#2ecc71" if status == "blocked" else "#95a5a6"
+            y_pos = 50 + i * 90 - (n_in_col - 1) * 45
+            nodes.append({
+                "id": node_id,
+                "data": {
+                    "label": f"{tid}\n{t.get('name', '')[:28]}",
+                    "status": status,
+                    "severity": t.get("cvss_severity", ""),
+                    "cvss": t.get("cvss_score", 0),
+                    "detail": t.get("detail", ""),
+                    "compliance": t.get("compliance", []),
+                    "remediation": t.get("remediation", ""),
+                    "color": color,
+                },
+                "position": {"x": col_x, "y": y_pos},
+                "style": {"border": f"2px solid {color}", "background": f"{color}22"},
+            })
+            # Edge: attacker → technique (found), ou técnica → target (blocked)
+            if status == "found":
+                edges.append({
+                    "id": f"e_att_{node_id}",
+                    "source": "attacker",
+                    "target": node_id,
+                    "animated": True,
+                    "style": {"stroke": "#e74c3c"},
+                })
+                edges.append({
+                    "id": f"e_{node_id}_tgt",
+                    "source": node_id,
+                    "target": "target",
+                    "animated": True,
+                    "style": {"stroke": "#e74c3c"},
+                })
+            else:
+                edges.append({
+                    "id": f"e_att_{node_id}",
+                    "source": "attacker",
+                    "target": node_id,
+                    "animated": False,
+                    "style": {"stroke": "#2ecc71", "strokeDasharray": "5,5"},
+                })
+        col_x += 160
+
+    # Restantes sem tática mapeada
+    for tac, tac_techs in by_tactic.items():
+        for i, t in enumerate(tac_techs):
+            tid = t.get("id", f"T_{i}")
+            node_id = f"{tid}_{col_x}"
+            status = t.get("status", "unknown")
+            color = "#e74c3c" if status == "found" else "#2ecc71" if status == "blocked" else "#95a5a6"
+            nodes.append({
+                "id": node_id,
+                "data": {"label": f"{tid}\n{t.get('name', '')[:28]}", "status": status, "color": color},
+                "position": {"x": col_x, "y": 50 + i * 90},
+                "style": {"border": f"2px solid {color}", "background": f"{color}22"},
+            })
+
+    summary = {
+        "total": len(techniques),
+        "found": sum(1 for t in techniques if t.get("status") == "found"),
+        "blocked": sum(1 for t in techniques if t.get("status") == "blocked"),
+        "score": sim.score,
+        "detection_coverage_pct": res.get("detection_coverage_pct", 0),
+    }
+
+    return {"nodes": nodes, "edges": edges, "summary": summary}
+
+
+# ── Compliance Reports ────────────────────────────────────────────────────────
+
+_COMPLIANCE_MAPPINGS = {
+    "lgpd": {
+        "title": "Relatório de Compliance — LGPD (Lei 13.709/2018)",
+        "subtitle": "Mapeamento de Vulnerabilidades aos Artigos da LGPD",
+        "framework_desc": "A Lei Geral de Proteção de Dados (LGPD) exige que organizações adotem medidas técnicas e administrativas para proteger dados pessoais.",
+        "controls": [
+            {"id": "Art. 46", "name": "Medidas de Segurança Técnicas", "desc": "Medidas para proteger dados pessoais de acessos não autorizados e situações acidentais ou ilícitas.", "techniques": ["T1190", "T1190b", "T1190c", "T1059", "T1083", "T1552"]},
+            {"id": "Art. 47", "name": "Confidencialidade por Agentes", "desc": "Obrigação de sigilo e confidencialidade no tratamento de dados pessoais.", "techniques": ["T1087", "T1087b", "T1185", "T1557", "T1552"]},
+            {"id": "Art. 48", "name": "Comunicação de Incidentes", "desc": "Obrigação de comunicar incidentes de segurança que possam acarretar risco ou dano.", "techniques": ["T1485", "T1486", "T1190e", "T1499"]},
+            {"id": "Art. 49", "name": "Sistemas Seguros por Design", "desc": "Sistemas projetados com medidas de segurança desde a concepção.", "techniques": ["T1592", "T1602", "T1592b", "T1595"]},
+        ],
+    },
+    "iso27001": {
+        "title": "Relatório de Compliance — ISO/IEC 27001:2022",
+        "subtitle": "Mapeamento de Vulnerabilidades aos Controles do Annex A",
+        "framework_desc": "A ISO/IEC 27001:2022 define controles de segurança da informação organizados no Annex A para gestão de riscos.",
+        "controls": [
+            {"id": "A.8.8", "name": "Gestão de Vulnerabilidades Técnicas", "desc": "Identificação e tratamento tempestivo de vulnerabilidades técnicas.", "techniques": ["T1190", "T1190b", "T1190c", "T1059", "T1083"]},
+            {"id": "A.8.20", "name": "Segurança de Redes", "desc": "Gerenciamento e controle de redes para proteger informações em sistemas e aplicações.", "techniques": ["T1040", "T1595", "T1595b", "T1590", "T1557"]},
+            {"id": "A.8.29", "name": "Testes de Segurança no Desenvolvimento", "desc": "Testes de segurança integrados ao ciclo de desenvolvimento.", "techniques": ["T1078", "T1110", "T1078b", "T1185"]},
+            {"id": "A.8.12", "name": "Prevenção de Vazamento de Dados", "desc": "Medidas para prevenir a divulgação não autorizada de informações sensíveis.", "techniques": ["T1087", "T1087b", "T1592b", "T1552"]},
+            {"id": "A.8.23", "name": "Filtragem Web", "desc": "Gerenciamento de acesso a sites externos para reduzir exposição a conteúdo malicioso.", "techniques": ["T1190e", "T1602", "T1592"]},
+        ],
+    },
+    "pcidss": {
+        "title": "Relatório de Compliance — PCI DSS 4.0",
+        "subtitle": "Mapeamento de Vulnerabilidades aos Requisitos PCI DSS",
+        "framework_desc": "O PCI DSS (Payment Card Industry Data Security Standard) v4.0 define requisitos de segurança para ambientes que processam dados de cartão de pagamento.",
+        "controls": [
+            {"id": "Req. 6.3", "name": "Vulnerabilidades de Segurança Identificadas e Endereçadas", "desc": "Manter componentes de sistema protegidos contra vulnerabilidades conhecidas.", "techniques": ["T1190", "T1190b", "T1059", "T1083"]},
+            {"id": "Req. 11.3", "name": "Testes de Penetração Externos e Internos", "desc": "Realizar testes de penetração pelo menos anualmente e após mudanças significativas.", "techniques": ["T1595", "T1595b", "T1590", "T1592"]},
+            {"id": "Req. 8.2", "name": "Identificação de Usuário e Autenticação", "desc": "Gerenciar identificação de usuários e autenticação para usuários e administradores.", "techniques": ["T1110", "T1078", "T1078b", "T1185", "T1190c"]},
+            {"id": "Req. 6.4", "name": "Aplicações Web Expostas à Internet Protegidas", "desc": "WAF ou revisão manual de código para aplicações web públicas.", "techniques": ["T1190", "T1059", "T1190e", "T1190b", "T1190c"]},
+            {"id": "Req. 10.2", "name": "Logs de Auditoria Implementados", "desc": "Implementar logs de auditoria para reconstruir atividades suspeitas.", "techniques": ["T1592b", "T1602", "T1557"]},
+        ],
+    },
+}
+
+
+@app.post("/api/reporting/compliance")
+async def generate_compliance_report(
+    req: ComplianceReportRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    framework = req.framework.lower()
+    if framework not in _COMPLIANCE_MAPPINGS:
+        raise HTTPException(status_code=400, detail="Framework inválido. Use: lgpd, iso27001, pcidss")
+
+    # Buscar simulação
+    if req.simulation_id:
+        sim = db.query(Simulation).filter(
+            Simulation.id == req.simulation_id, Simulation.user_id == current_user.id
+        ).first()
+        if not sim:
+            raise HTTPException(status_code=404, detail="Simulação não encontrada")
+    else:
+        sim = db.query(Simulation).filter(
+            Simulation.user_id == current_user.id,
+            Simulation.status == "completed",
+        ).order_by(Simulation.date.desc()).first()
+        if not sim:
+            raise HTTPException(status_code=404, detail="Nenhuma simulação completada encontrada")
+
+    mapping = _COMPLIANCE_MAPPINGS[framework]
+    techniques = (sim.results or {}).get("techniques", [])
+    found_ids = {t.get("id") for t in techniques if t.get("status") == "found"}
+
+    # Gerar PDF de compliance
+    pdf_bytes = _build_compliance_pdf(mapping, techniques, found_ids, sim, current_user.username)
+
+    title = f"compliance_{framework}_{sim.id[:8]}"
+    report = Report(
+        user_id=current_user.id,
+        title=title,
+        type=f"compliance_{framework}",
+        format="pdf",
+        content=pdf_bytes,
+    )
+    db.add(report)
+    db.commit()
+    db.refresh(report)
+
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{title}.pdf"'},
+    )
+
+
+def _build_compliance_pdf(mapping: dict, techniques: list, found_ids: set, sim, username: str) -> bytes:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import cm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable, PageBreak
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=2*cm, rightMargin=2*cm,
+                            topMargin=2*cm, bottomMargin=2*cm)
+    styles = getSampleStyleSheet()
+    C = colors.HexColor
+    NAVY = C("#0B1426"); TEAL = C("#00BCD4"); WHT = colors.white
+    RED = C("#e74c3c"); GRN = C("#27ae60"); GRY = C("#7f8c8d")
+
+    story = []
+    W = A4[0] - 4*cm
+
+    # Capa
+    story.append(Spacer(1, 1*cm))
+    story.append(Paragraph(mapping["title"],
+        ParagraphStyle("ct", fontSize=18, textColor=NAVY, fontName="Helvetica-Bold", spaceAfter=6)))
+    story.append(Paragraph(mapping["subtitle"],
+        ParagraphStyle("cs", fontSize=12, textColor=TEAL, fontName="Helvetica", spaceAfter=12)))
+    story.append(HRFlowable(width=W, color=TEAL, thickness=2))
+    story.append(Spacer(1, 0.5*cm))
+
+    # Meta
+    found_count = sum(1 for t in techniques if t.get("status") == "found")
+    blocked_count = sum(1 for t in techniques if t.get("status") == "blocked")
+    meta = [
+        ["Organização:", username],
+        ["Target avaliado:", sim.target],
+        ["Data da avaliação:", sim.date.strftime("%d/%m/%Y %H:%M") if sim.date else "—"],
+        ["Score de risco:", f"{sim.score:.1f}%"],
+        ["Técnicas testadas:", str(len(techniques))],
+        ["Vulnerabilidades encontradas:", str(found_count)],
+        ["Controles ativos:", str(blocked_count)],
+        ["Framework:", mapping["title"].split("—")[-1].strip()],
+    ]
+    t_meta = Table(meta, colWidths=[5*cm, W - 5*cm])
+    t_meta.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+        ("FONTNAME", (1, 0), (1, -1), "Helvetica"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("TEXTCOLOR", (0, 0), (0, -1), NAVY),
+        ("ROWBACKGROUNDS", (0, 0), (-1, -1), [C("#F0F4F8"), WHT]),
+        ("GRID", (0, 0), (-1, -1), 0.3, C("#DDDDDD")),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    story.append(t_meta)
+    story.append(Spacer(1, 0.5*cm))
+    story.append(Paragraph(mapping["framework_desc"],
+        ParagraphStyle("fd", fontSize=9, textColor=C("#444444"), leading=13)))
+    story.append(PageBreak())
+
+    # Controles
+    story.append(Paragraph("Mapeamento de Vulnerabilidades por Controle",
+        ParagraphStyle("h1", fontSize=14, textColor=NAVY, fontName="Helvetica-Bold", spaceAfter=8)))
+    story.append(HRFlowable(width=W, color=TEAL, thickness=1.5))
+    story.append(Spacer(1, 0.3*cm))
+
+    for ctrl in mapping["controls"]:
+        # Identificar técnicas vulneráveis neste controle
+        ctrl_found = [t for t in techniques if t.get("id") in ctrl["techniques"] and t.get("status") == "found"]
+        ctrl_blocked = [t for t in techniques if t.get("id") in ctrl["techniques"] and t.get("status") == "blocked"]
+        tested_ids = {t.get("id") for t in techniques if t.get("id") in ctrl["techniques"]}
+        status_text = "CONFORME" if not ctrl_found else "NÃO CONFORME"
+        status_color = GRN if not ctrl_found else RED
+
+        # Header do controle
+        ctrl_header = Table([[
+            Paragraph(f"{ctrl['id']} — {ctrl['name']}",
+                ParagraphStyle("ch", fontSize=10, textColor=WHT, fontName="Helvetica-Bold")),
+            Paragraph(status_text,
+                ParagraphStyle("cs2", fontSize=9, textColor=WHT, fontName="Helvetica-Bold", alignment=2)),
+        ]], colWidths=[W*0.75, W*0.25])
+        ctrl_header.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), status_color if ctrl_found else NAVY),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ("LEFTPADDING", (0, 0), (0, -1), 8),
+        ]))
+        story.append(ctrl_header)
+        story.append(Paragraph(ctrl["desc"],
+            ParagraphStyle("cd", fontSize=8, textColor=C("#444444"), leading=12,
+                           leftIndent=8, spaceAfter=4, spaceBefore=4)))
+
+        if not tested_ids:
+            story.append(Paragraph("Nenhuma técnica relacionada a este controle foi testada nesta simulação.",
+                ParagraphStyle("na", fontSize=8, textColor=GRY, leftIndent=8, spaceAfter=6)))
+        else:
+            rows = [["Técnica", "Nome", "Status", "CVSS"]]
+            for t in techniques:
+                if t.get("id") not in ctrl["techniques"]:
+                    continue
+                s = t.get("status", "unknown")
+                s_label = "✓ Protegido" if s == "blocked" else "✗ Vulnerável" if s == "found" else "? Desconhecido"
+                rows.append([t.get("id", ""), t.get("name", "")[:40], s_label, f"{t.get('cvss_score', 0):.1f}"])
+            t_ctrl = Table(rows, colWidths=[2*cm, W*0.5 - 2*cm, 2.8*cm, 1.5*cm])
+            style_rows = [
+                ("BACKGROUND", (0, 0), (-1, 0), NAVY),
+                ("TEXTCOLOR", (0, 0), (-1, 0), WHT),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ("GRID", (0, 0), (-1, -1), 0.3, C("#DDDDDD")),
+                ("TOPPADDING", (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ]
+            for i, row in enumerate(rows[1:], 1):
+                if "Vulnerável" in row[2]:
+                    style_rows.append(("BACKGROUND", (0, i), (-1, i), C("#FDECEC")))
+                    style_rows.append(("TEXTCOLOR", (2, i), (2, i), RED))
+                else:
+                    style_rows.append(("BACKGROUND", (0, i), (-1, i), C("#EDFDF4") if i % 2 == 0 else WHT))
+                    style_rows.append(("TEXTCOLOR", (2, i), (2, i), GRN))
+            t_ctrl.setStyle(TableStyle(style_rows))
+            story.append(t_ctrl)
+        story.append(Spacer(1, 0.4*cm))
+
+    # Sumário de conformidade
+    story.append(PageBreak())
+    story.append(Paragraph("Sumário de Conformidade",
+        ParagraphStyle("h2", fontSize=14, textColor=NAVY, fontName="Helvetica-Bold", spaceAfter=8)))
+    story.append(HRFlowable(width=W, color=TEAL, thickness=1.5))
+    story.append(Spacer(1, 0.3*cm))
+
+    total_ctrl = len(mapping["controls"])
+    conforme = sum(1 for c in mapping["controls"]
+                   if not any(t for t in techniques if t.get("id") in c["techniques"] and t.get("status") == "found"))
+    nao_conforme = total_ctrl - conforme
+    pct = round(conforme / max(total_ctrl, 1) * 100)
+
+    summary_data = [
+        ["Total de Controles Avaliados", str(total_ctrl)],
+        ["Controles Conformes", str(conforme)],
+        ["Controles Não Conformes", str(nao_conforme)],
+        ["Índice de Conformidade", f"{pct}%"],
+    ]
+    t_sum = Table(summary_data, colWidths=[W * 0.6, W * 0.4])
+    t_sum.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+        ("FONTNAME", (1, 0), (1, -1), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 10),
+        ("TEXTCOLOR", (0, 0), (0, -1), NAVY),
+        ("TEXTCOLOR", (1, 3), (1, 3), GRN if pct >= 70 else RED),
+        ("ROWBACKGROUNDS", (0, 0), (-1, -1), [C("#F0F4F8"), WHT]),
+        ("GRID", (0, 0), (-1, -1), 0.3, C("#DDDDDD")),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("LEFTPADDING", (0, 0), (0, -1), 8),
+        ("ALIGN", (1, 0), (1, -1), "CENTER"),
+    ]))
+    story.append(t_sum)
+    story.append(Spacer(1, 0.5*cm))
+    verdict = (f"Com {pct}% de conformidade, a organização apresenta "
+               + ("boa aderência ao framework." if pct >= 70 else
+                  "necessidade de melhoria em vários controles." if pct >= 40 else
+                  "lacunas críticas que requerem ação imediata."))
+    story.append(Paragraph(verdict,
+        ParagraphStyle("vv", fontSize=10, textColor=NAVY, leading=14)))
+
+    doc.build(story)
+    return buf.getvalue()
+
+
+# ── WebSocket Dashboard ───────────────────────────────────────────────────────
+
+@app.websocket("/ws/dashboard")
+async def ws_dashboard(websocket: WebSocket):
+    await websocket.accept()
+    _ws_clients.add(websocket)
+    try:
+        db_ws = SessionLocal()
+        try:
+            # Send initial state
+            sims = db_ws.query(Simulation).order_by(Simulation.date.desc()).limit(5).all()
+            await websocket.send_json({
+                "type": "init",
+                "simulations": [{"id": s.id, "status": s.status, "score": s.score, "target": s.target} for s in sims],
+                "timestamp": datetime.utcnow().isoformat(),
+            })
+        finally:
+            db_ws.close()
+        while True:
+            data = await websocket.receive_text()
+            if data == "ping":
+                await websocket.send_json({"type": "pong", "timestamp": datetime.utcnow().isoformat()})
+    except WebSocketDisconnect:
+        _ws_clients.discard(websocket)
+    except Exception:
+        _ws_clients.discard(websocket)
+
+
+async def _ws_broadcast(msg: dict):
+    dead = set()
+    for ws in list(_ws_clients):
+        try:
+            await ws.send_json(msg)
+        except Exception:
+            dead.add(ws)
+    _ws_clients.difference_update(dead)
+
+
+# ── Notifications ─────────────────────────────────────────────────────────────
+
+class NotificationCreateRequest(BaseModel):
+    title: str
+    message: str
+    type: str = "info"
+
+@app.get("/api/notifications")
+async def list_notifications(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    notifs = db.query(Notification).filter(
+        Notification.user_id == current_user.id
+    ).order_by(Notification.created_at.desc()).limit(50).all()
+    unread = sum(1 for n in notifs if not n.read)
+    return {
+        "notifications": [
+            {"id": n.id, "title": n.title, "message": n.message, "type": n.type,
+             "read": n.read, "created_at": n.created_at.isoformat()}
+            for n in notifs
+        ],
+        "unread_count": unread,
+    }
+
+@app.patch("/api/notifications/{notif_id}/read")
+async def mark_notification_read(notif_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    n = db.query(Notification).filter(Notification.id == notif_id, Notification.user_id == current_user.id).first()
+    if not n:
+        raise HTTPException(status_code=404, detail="Notificação não encontrada")
+    n.read = True
+    db.commit()
+    return {"message": "ok"}
+
+@app.post("/api/notifications/mark-all-read")
+async def mark_all_notifications_read(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    db.query(Notification).filter(Notification.user_id == current_user.id, Notification.read == False).update({"read": True})
+    db.commit()
+    return {"message": "ok"}
+
+
+def _create_notification(db: Session, user_id: str, title: str, message: str, ntype: str = "info"):
+    n = Notification(user_id=user_id, title=title, message=message, type=ntype)
+    db.add(n)
+    db.commit()
+
+
+# ── Audit Log (persistent) ────────────────────────────────────────────────────
+
+def _audit(db: Session, module: str, action: str, details: str = "", user_id: str = None):
+    log = AuditLog(module=module, action=action, details=details, user_id=user_id)
+    db.add(log)
+    db.commit()
+    _operation_logs.append({"module": module, "action": action, "details": details, "timestamp": datetime.utcnow().isoformat()})
+
+@app.get("/api/audit-log")
+async def get_audit_log(
+    limit: int = 100,
+    module: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    q = db.query(AuditLog).order_by(AuditLog.created_at.desc())
+    if module:
+        q = q.filter(AuditLog.module == module)
+    logs = q.limit(limit).all()
+    return {"logs": [
+        {"id": l.id, "module": l.module, "action": l.action, "details": l.details, "created_at": l.created_at.isoformat()}
+        for l in logs
+    ]}
+
+
+# ── MITRE ATT&CK Matrix endpoint ──────────────────────────────────────────────
+
+@app.get("/api/bas/attck-matrix")
+async def attck_matrix(
+    simulation_id: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from bas_engine import ALL_TECHNIQUES
+
+    TACTIC_META = {
+        "RECONNAISSANCE":       ("TA0043", "RECON"),
+        "RESOURCE_DEVELOPMENT": ("TA0042", "RESOURCE"),
+        "INITIAL_ACCESS":       ("TA0001", "INIT ACCESS"),
+        "EXECUTION":            ("TA0002", "EXEC"),
+        "PERSISTENCE":          ("TA0003", "PERSIST"),
+        "PRIVILEGE_ESCALATION": ("TA0004", "PRIV ESC"),
+        "DEFENSE_EVASION":      ("TA0005", "DEF EVASION"),
+        "CREDENTIAL_ACCESS":    ("TA0006", "CRED ACCESS"),
+        "DISCOVERY":            ("TA0007", "DISCOVERY"),
+        "LATERAL_MOVEMENT":     ("TA0008", "LAT MOVE"),
+        "COLLECTION":           ("TA0009", "COLLECTION"),
+        "COMMAND_AND_CONTROL":  ("TA0011", "C2"),
+        "EXFILTRATION":         ("TA0010", "EXFIL"),
+        "IMPACT":               ("TA0040", "IMPACT"),
+    }
+
+    # Gather findings for this user
+    sims_q = db.query(Simulation).filter(Simulation.user_id == current_user.id, Simulation.status == "done")
+    if simulation_id:
+        sims_q = sims_q.filter(Simulation.id == simulation_id)
+    sims = sims_q.all()
+
+    # Build status map: technique_id -> {status, cvss, simulations}
+    status_map: dict = {}
+    for sim in sims:
+        for t in (sim.results or {}).get("techniques", []):
+            tid = t.get("id", "")
+            if not tid:
+                continue
+            existing = status_map.get(tid)
+            if not existing or t.get("status") == "found":
+                status_map[tid] = {
+                    "status": t.get("status", "not_tested"),
+                    "cvss": t.get("cvss", 0),
+                    "simulations": (existing["simulations"] + 1) if existing else 1,
+                }
+
+    # Build matrix grouped by tactic (preserving insertion order)
+    tactic_map: dict = {}
+    for tech in ALL_TECHNIQUES:
+        tac_name = tech.tactic.name  # e.g. "RECONNAISSANCE"
+        if tac_name not in tactic_map:
+            tactic_map[tac_name] = []
+        tid = tech.technique_id
+        st_info = status_map.get(tid, {"status": "not_tested", "cvss": 0, "simulations": 0})
+        tactic_map[tac_name].append({
+            "id": tid,
+            "name": tech.name,
+            "status": st_info["status"],
+            "cvss": st_info["cvss"],
+            "simulations": st_info["simulations"],
+            "description": tech.description,
+            "severity": tech.severity,
+            "compliance": [],
+            "remediation": "",
+        })
+
+    tactic_list = []
+    for tac_name, techs in tactic_map.items():
+        meta = TACTIC_META.get(tac_name, ("", tac_name[:8]))
+        tactic_list.append({
+            "id": meta[0],
+            "name": tac_name.replace("_", " ").title(),
+            "short": meta[1],
+            "techniques": techs,
+        })
+
+    all_techs = [t for tac in tactic_list for t in tac["techniques"]]
+    total = len(all_techs)
+    tested = sum(1 for t in all_techs if t["status"] != "not_tested")
+    found = sum(1 for t in all_techs if t["status"] == "found")
+    blocked = sum(1 for t in all_techs if t["status"] == "blocked")
+
+    return {
+        "tactics": tactic_list,
+        "stats": {
+            "total": total,
+            "tested": tested,
+            "found": found,
+            "blocked": blocked,
+            "not_tested": total - tested,
+            "coverage_pct": round(tested / max(total, 1) * 100, 1),
+        },
+    }
+
+
+# ── Vulnerability Database ─────────────────────────────────────────────────────
+
+@app.get("/api/bas/vulndb")
+async def vuln_db(
+    severity: Optional[str] = None,
+    status: Optional[str] = None,
+    days: Optional[int] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    sims_q = db.query(Simulation).filter(
+        Simulation.user_id == current_user.id,
+        Simulation.status == "done",
+    )
+    if days:
+        since = datetime.utcnow() - timedelta(days=days)
+        sims_q = sims_q.filter(Simulation.date >= since)
+    sims = sims_q.order_by(Simulation.date.desc()).all()
+
+    vulns = []
+    seen = set()
+    for sim in sims:
+        results = sim.results or {}
+        for t in results.get("techniques", []):
+            if status and t.get("status") != status:
+                continue
+            sev = t.get("severity", "")
+            if severity and sev.lower() != severity.lower():
+                continue
+            key = (t.get("id", ""), sim.target)
+            vulns.append({
+                "id": f"{sim.id}_{t.get('id','')}",
+                "technique_id": t.get("id", ""),
+                "name": t.get("name", ""),
+                "severity": sev,
+                "cvss": t.get("cvss", 0),
+                "status": t.get("status", ""),
+                "target": sim.target,
+                "simulation_id": sim.id,
+                "date": sim.date.isoformat(),
+                "compliance": t.get("compliance", []),
+                "remediation": t.get("remediation", ""),
+                "detail": t.get("detail", ""),
+                "description": t.get("description", ""),
+            })
+
+    sev_order = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "": 4}
+    vulns.sort(key=lambda v: (sev_order.get(v["severity"], 4), -v["cvss"]))
+
+    stats = {
+        "total": len(vulns),
+        "critical": sum(1 for v in vulns if v["severity"] == "Critical"),
+        "high": sum(1 for v in vulns if v["severity"] == "High"),
+        "medium": sum(1 for v in vulns if v["severity"] == "Medium"),
+        "low": sum(1 for v in vulns if v["severity"] == "Low"),
+        "unique_techniques": len({v["technique_id"] for v in vulns}),
+    }
+    return {"vulns": vulns, "stats": stats}
+
+
+@app.get("/api/bas/vulndb/export")
+async def vuln_db_export(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    import csv, io as _io
+    sims = db.query(Simulation).filter(
+        Simulation.user_id == current_user.id, Simulation.status == "done"
+    ).all()
+    buf = _io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["Technique ID", "Name", "Severity", "CVSS", "Status", "Target", "Simulation ID", "Date", "Compliance", "Remediation"])
+    for sim in sims:
+        for t in (sim.results or {}).get("techniques", []):
+            writer.writerow([
+                t.get("id", ""), t.get("name", ""), t.get("severity", ""),
+                t.get("cvss", 0), t.get("status", ""), sim.target, sim.id,
+                sim.date.strftime("%Y-%m-%d %H:%M"), ";".join(t.get("compliance", [])),
+                t.get("remediation", "")
+            ])
+    buf.seek(0)
+    return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=penteia_vulndb.csv"})
+
+
+# ── BAS Retest (post-remediation) ─────────────────────────────────────────────
+
+@app.post("/api/bas/retest/{sim_id}")
+async def bas_retest(
+    sim_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    original = db.query(Simulation).filter(
+        Simulation.id == sim_id, Simulation.user_id == current_user.id
+    ).first()
+    if not original:
+        raise HTTPException(status_code=404, detail="Simulação original não encontrada")
+    if original.status != "done":
+        raise HTTPException(status_code=400, detail="Simulação ainda não concluída")
+
+    playbook = db.query(Playbook).filter(Playbook.id == original.playbook_id).first()
+    if not playbook:
+        raise HTTPException(status_code=404, detail="Playbook não encontrado")
+
+    retest_sim = Simulation(
+        user_id=current_user.id,
+        playbook_id=original.playbook_id,
+        target=original.target,
+        status="running",
+        score=0.0,
+    )
+    db.add(retest_sim)
+    db.commit()
+    db.refresh(retest_sim)
+
+    threading.Thread(
+        target=_bas_run_retest,
+        args=(retest_sim.id, original.id, playbook.name, original.target, playbook.severity, playbook.techniques),
+        daemon=True,
+    ).start()
+
+    _operation_logs.append({
+        "module": "BAS", "action": "Retest iniciado",
+        "details": f"Retest de {sim_id} → {original.target}",
+        "timestamp": datetime.utcnow().isoformat(),
+    })
+    return {"id": retest_sim.id, "original_id": sim_id, "status": "running", "message": "Retest iniciado"}
+
+
+def _bas_run_retest(retest_id: str, original_id: str, playbook_name: str, target: str, severity: str, num_techniques: int):
+    """Execute retest and compare with original simulation."""
+    _bas_run(retest_id, playbook_name, target, severity, num_techniques)
+    db_r = SessionLocal()
+    try:
+        retest = db_r.query(Simulation).filter(Simulation.id == retest_id).first()
+        original = db_r.query(Simulation).filter(Simulation.id == original_id).first()
+        if retest and original and retest.results and original.results:
+            orig_vulns = {t["id"] for t in original.results.get("techniques", []) if t.get("status") == "found"}
+            retest_vulns = {t["id"] for t in retest.results.get("techniques", []) if t.get("status") == "found"}
+            remediated = orig_vulns - retest_vulns
+            new_vulns = retest_vulns - orig_vulns
+            retest_results = dict(retest.results)
+            retest_results["retest_comparison"] = {
+                "original_id": original_id,
+                "original_score": original.score,
+                "retest_score": retest.score,
+                "improvement": round(retest.score - original.score, 1),
+                "remediated_count": len(remediated),
+                "remediated_techniques": list(remediated),
+                "new_vulns_count": len(new_vulns),
+                "new_vuln_techniques": list(new_vulns),
+            }
+            retest.results = retest_results
+            db_r.commit()
+    finally:
+        db_r.close()
+
+
+# ── Payload Generator ─────────────────────────────────────────────────────────
+
+class PayloadGenerateRequest(BaseModel):
+    payload_type: str = "test"
+    encoder: str = "xor"
+    output_format: str = "base64"
+    xor_key: Optional[str] = None
+    aes_key: Optional[str] = None
+    iterations: int = 1
+
+@app.get("/api/payload/templates")
+async def payload_templates(current_user: User = Depends(get_current_user)):
+    if _HAS_PAYLOAD_GEN:
+        return {"templates": _get_payload_templates()}
+    return {"templates": [
+        {"id": "test_eicar", "name": "EICAR-style Test String", "description": "Inert test payload for AV/EDR validation"},
+        {"id": "ps1_dropper", "name": "PowerShell Dropper", "description": "PS1 dropper template for endpoint testing"},
+        {"id": "python_rev", "name": "Python Reverse Shell Stub", "description": "Python test artifact (inert)"},
+    ]}
+
+@app.post("/api/payload/generate")
+async def payload_generate(
+    req: PayloadGenerateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if not _HAS_PAYLOAD_GEN:
+        raise HTTPException(status_code=503, detail="Módulo payload_generator não instalado")
+    try:
+        enc = EncoderType(req.encoder)
+        fmt = PayloadFormat(req.output_format)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    result = _gen_payload(
+        payload_type=req.payload_type,
+        encoder=enc,
+        output_format=fmt,
+        xor_key=req.xor_key,
+        aes_key=req.aes_key,
+        iterations=max(1, min(req.iterations, 5)),
+    )
+
+    payload_rec = Payload(
+        user_id=current_user.id,
+        name=f"{req.payload_type}_{req.encoder}_{datetime.utcnow().strftime('%H%M%S')}",
+        type=f"{req.encoder}/{req.output_format}",
+        size=str(result["size_bytes"]),
+        content=result["payload_b64"].encode(),
+    )
+    db.add(payload_rec)
+    db.commit()
+    db.refresh(payload_rec)
+
+    _operation_logs.append({"module": "Evasion", "action": "Payload gerado",
+        "details": f"{req.payload_type} ({req.encoder}/{req.output_format})",
+        "timestamp": datetime.utcnow().isoformat()})
+    return {**result, "saved_payload_id": payload_rec.id}
+
+
+# ── Cloud Recon ───────────────────────────────────────────────────────────────
+
+class CloudReconRequest(BaseModel):
+    host: str
+    company_name: str = ""
+    extra_words: List[str] = []
+
+@app.post("/api/cloud/recon")
+async def cloud_recon_start(
+    req: CloudReconRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    record = CloudReconResult(
+        user_id=current_user.id,
+        host=req.host,
+        company_name=req.company_name or req.host.split(".")[0],
+        status="running",
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+
+    def _run(rec_id: str, host: str, company: str, words: list):
+        db2 = SessionLocal()
+        try:
+            rec = db2.query(CloudReconResult).filter(CloudReconResult.id == rec_id).first()
+            if not rec:
+                return
+            if _HAS_CLOUD_RECON:
+                cr = _run_cloud_recon(host, company, words)
+                rec.cloud_provider = cr.cloud_provider
+                rec.results = {
+                    "s3_buckets": cr.s3_buckets,
+                    "metadata_endpoints": cr.metadata_endpoints,
+                    "iam_findings": cr.iam_findings,
+                    "errors": cr.errors,
+                }
+            else:
+                rec.cloud_provider = "Not available (cloud_recon module missing)"
+                rec.results = {"s3_buckets": [], "metadata_endpoints": [], "iam_findings": [], "errors": []}
+            rec.status = "done"
+            rec.completed_at = datetime.utcnow()
+            db2.commit()
+        except Exception as e:
+            try:
+                rec.status = "error"
+                rec.results = {"error": str(e)}
+                db2.commit()
+            except Exception:
+                pass
+        finally:
+            db2.close()
+
+    threading.Thread(target=_run, args=(record.id, req.host, record.company_name, req.extra_words), daemon=True).start()
+    _operation_logs.append({"module": "Recon", "action": "Cloud Recon",
+        "details": req.host, "timestamp": datetime.utcnow().isoformat()})
+    return {"id": record.id, "status": "running", "message": "Cloud recon iniciado"}
+
+
+@app.get("/api/cloud/results/{result_id}")
+async def cloud_recon_result(result_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    rec = db.query(CloudReconResult).filter(
+        CloudReconResult.id == result_id, CloudReconResult.user_id == current_user.id
+    ).first()
+    if not rec:
+        raise HTTPException(status_code=404, detail="Resultado não encontrado")
+    return {
+        "id": rec.id, "host": rec.host, "company_name": rec.company_name,
+        "status": rec.status, "cloud_provider": rec.cloud_provider,
+        "results": rec.results or {},
+        "created_at": rec.created_at.isoformat(),
+        "completed_at": rec.completed_at.isoformat() if rec.completed_at else None,
+    }
+
+
+@app.get("/api/cloud/results")
+async def cloud_recon_list(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    recs = db.query(CloudReconResult).filter(
+        CloudReconResult.user_id == current_user.id
+    ).order_by(CloudReconResult.created_at.desc()).limit(20).all()
+    return {"results": [
+        {"id": r.id, "host": r.host, "company_name": r.company_name, "status": r.status,
+         "cloud_provider": r.cloud_provider, "created_at": r.created_at.isoformat()}
+        for r in recs
+    ]}
+
+
+# ── BAS Adaptive (fallback when technique blocked) ────────────────────────────
+
+@app.get("/api/bas/adaptive-playbook/{sim_id}")
+async def adaptive_playbook(
+    sim_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Generate an adaptive playbook with fallback techniques for blocked ones."""
+    sim = db.query(Simulation).filter(
+        Simulation.id == sim_id, Simulation.user_id == current_user.id
+    ).first()
+    if not sim:
+        raise HTTPException(status_code=404, detail="Simulação não encontrada")
+
+    FALLBACKS = {
+        "T1190": ["T1078", "T1133"],    # Exploit pub facing → Valid Accounts / External Remote
+        "T1059": ["T1086", "T1064"],    # Command Script → PowerShell / Scripting
+        "T1003": ["T1552", "T1555"],    # OS Cred Dump → Unsecured Creds / Creds from Stores
+        "T1053": ["T1543", "T1547"],    # Scheduled Task → Create/Modify Service / Boot Autostart
+        "T1055": ["T1574", "T1218"],    # Process Injection → Hijack Exec Flow / Signed Binary Proxy
+        "T1021": ["T1563", "T1570"],    # Remote Services → Remote Session Hijack / Lateral Tool Transfer
+        "T1041": ["T1048", "T1567"],    # Exfil over C2 → Exfil over Alt Proto / Exfil over Web Service
+        "T1486": ["T1490", "T1485"],    # Data Encrypted → Inhibit Recovery / Data Destruction
+    }
+
+    results = sim.results or {}
+    techniques = results.get("techniques", [])
+    blocked = [t for t in techniques if t.get("status") == "blocked"]
+
+    adaptive = []
+    for t in blocked:
+        tid = t.get("id", "")
+        fallbacks = FALLBACKS.get(tid, [])
+        adaptive.append({
+            "original_technique": tid,
+            "original_name": t.get("name", ""),
+            "reason_blocked": "Detectado/bloqueado pela defesa",
+            "fallback_techniques": fallbacks,
+            "recommendation": f"Tente {', '.join(fallbacks) if fallbacks else 'técnica alternativa'} para contornar a defesa",
+        })
+
+    return {
+        "simulation_id": sim_id,
+        "blocked_count": len(blocked),
+        "adaptive_techniques": adaptive,
+        "message": f"{len(adaptive)} técnicas com alternativas sugeridas",
+    }
+
+
+# ── SIEM/EDR Integration stub ─────────────────────────────────────────────────
+
+class SIEMCheckRequest(BaseModel):
+    simulation_id: str
+    siem_type: str = "wazuh"   # wazuh / elastic / splunk
+    siem_url: Optional[str] = None
+    siem_token: Optional[str] = None
+
+@app.post("/api/bas/siem-check")
+async def siem_detection_check(
+    req: SIEMCheckRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Check if BAS simulation techniques were detected by SIEM/EDR."""
+    sim = db.query(Simulation).filter(
+        Simulation.id == req.simulation_id, Simulation.user_id == current_user.id
+    ).first()
+    if not sim:
+        raise HTTPException(status_code=404, detail="Simulação não encontrada")
+
+    techniques = (sim.results or {}).get("techniques", [])
+    detection_results = []
+
+    if req.siem_url and req.siem_token and req.siem_type == "wazuh":
+        for t in techniques:
+            if t.get("status") != "found":
+                continue
+            try:
+                headers = {"Authorization": f"Bearer {req.siem_token}"}
+                r = _requests.get(
+                    f"{req.siem_url}/api/alerts",
+                    params={"q": f"rule.mitre.id:{t.get('id','')}", "limit": 5},
+                    headers=headers, timeout=5, verify=False,
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    count = data.get("data", {}).get("totalItems", 0)
+                    detection_results.append({
+                        "technique_id": t.get("id"), "name": t.get("name"),
+                        "siem_detected": count > 0, "alert_count": count,
+                        "siem_type": "wazuh",
+                    })
+            except Exception:
+                detection_results.append({
+                    "technique_id": t.get("id"), "name": t.get("name"),
+                    "siem_detected": None, "alert_count": 0,
+                    "siem_type": "wazuh", "error": "Falha ao consultar SIEM",
+                })
+    else:
+        # Stub response when no SIEM configured
+        for t in techniques[:10]:
+            if t.get("status") == "found":
+                detection_results.append({
+                    "technique_id": t.get("id"), "name": t.get("name"),
+                    "siem_detected": None, "alert_count": 0,
+                    "siem_type": req.siem_type,
+                    "note": "Configure SIEM URL e token para resultados reais",
+                })
+
+    detected = sum(1 for d in detection_results if d.get("siem_detected"))
+    total_checked = len(detection_results)
+    return {
+        "simulation_id": req.simulation_id,
+        "siem_type": req.siem_type,
+        "siem_configured": bool(req.siem_url and req.siem_token),
+        "techniques_checked": total_checked,
+        "detected_by_siem": detected,
+        "not_detected": total_checked - detected,
+        "detection_rate_pct": round(detected / max(total_checked, 1) * 100, 1),
+        "results": detection_results,
+    }
 
 
 # ── Root ─────────────────────────────────────────────────────────────────────

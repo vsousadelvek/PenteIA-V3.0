@@ -1,7 +1,6 @@
 import React, { useState, useEffect, lazy, Suspense } from 'react'
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom'
-import Navbar from './components/Navbar'
-import Footer from './components/Footer'
+import Sidebar from './components/Sidebar'
 import ErrorBoundary from './components/ErrorBoundary'
 import { ToastProvider } from './components/Toast'
 import api from './api'
@@ -18,6 +17,11 @@ const Operations = lazy(() => import('./pages/Operations'))
 const Reporting = lazy(() => import('./pages/Reporting'))
 const Admin = lazy(() => import('./pages/Admin'))
 const Campaign = lazy(() => import('./pages/Campaign'))
+const Agents = lazy(() => import('./pages/Agents'))
+const AttackPath = lazy(() => import('./pages/AttackPath'))
+const ATTCKMatrix = lazy(() => import('./pages/ATTCKMatrix'))
+const VulnDB = lazy(() => import('./pages/VulnDB'))
+const Cloud = lazy(() => import('./pages/Cloud'))
 
 const ProtectedRoute = ({ element }) => {
   const token = localStorage.getItem('token')
@@ -41,6 +45,7 @@ export default function App() {
   const [systemStatus, setSystemStatus] = useState('online')
   const [isAuthenticated, setIsAuthenticated] = useState(!!localStorage.getItem('token'))
   const [isAdmin, setIsAdmin] = useState(localStorage.getItem('is_admin') === 'true')
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('sidebar_collapsed') === 'true')
 
   useEffect(() => {
     const checkHealth = async () => {
@@ -80,28 +85,39 @@ export default function App() {
     <ToastProvider>
       <Router>
         <ErrorBoundary>
-          <div className="flex flex-col min-h-screen bg-dark-900">
-            {isAuthenticated && <Navbar systemStatus={systemStatus} onLogout={handleLogout} isAdmin={isAdmin} />}
-            <main className="flex-1 container mx-auto px-4 py-8">
-              <Suspense fallback={<PageLoader />}>
-                <Routes>
-                  <Route path="/login" element={<Login onLoginSuccess={handleLoginSuccess} />} />
-                  <Route path="/" element={<ProtectedRoute element={<Dashboard />} />} />
-                  <Route path="/dashboard" element={<ProtectedRoute element={<Dashboard />} />} />
-                  <Route path="/recon" element={<ProtectedRoute element={<Recon />} />} />
-                  <Route path="/ddos" element={<ProtectedRoute element={<DDoS />} />} />
-                  <Route path="/modules" element={<ProtectedRoute element={<Modules />} />} />
-                  <Route path="/c2" element={<ProtectedRoute element={<C2 />} />} />
-                  <Route path="/bas" element={<ProtectedRoute element={<BAS />} />} />
-                  <Route path="/evasion" element={<ProtectedRoute element={<Evasion />} />} />
-                  <Route path="/operations" element={<ProtectedRoute element={<Operations />} />} />
-                  <Route path="/reporting" element={<ProtectedRoute element={<Reporting />} />} />
-                  <Route path="/campaign" element={<ProtectedRoute element={<Campaign />} />} />
-                  <Route path="/admin" element={<AdminRoute element={<Admin />} isAdmin={isAdmin} />} />
-                </Routes>
-              </Suspense>
-            </main>
-            {isAuthenticated && <Footer />}
+          <div className="flex min-h-screen bg-dark-900">
+            {isAuthenticated && (
+              <Sidebar systemStatus={systemStatus} onLogout={handleLogout} isAdmin={isAdmin} onCollapse={setSidebarCollapsed} />
+            )}
+            <div
+              className="flex-1 flex flex-col min-w-0 transition-all duration-200"
+              style={{ paddingLeft: isAuthenticated ? (sidebarCollapsed ? 56 : 220) : 0 }}
+            >
+              <main className="flex-1 px-6 py-6">
+                <Suspense fallback={<PageLoader />}>
+                  <Routes>
+                    <Route path="/login" element={<Login onLoginSuccess={handleLoginSuccess} />} />
+                    <Route path="/" element={<ProtectedRoute element={<Dashboard />} />} />
+                    <Route path="/dashboard" element={<ProtectedRoute element={<Dashboard />} />} />
+                    <Route path="/recon" element={<ProtectedRoute element={<Recon />} />} />
+                    <Route path="/ddos" element={<ProtectedRoute element={<DDoS />} />} />
+                    <Route path="/modules" element={<ProtectedRoute element={<Modules />} />} />
+                    <Route path="/c2" element={<ProtectedRoute element={<C2 />} />} />
+                    <Route path="/bas" element={<ProtectedRoute element={<BAS />} />} />
+                    <Route path="/evasion" element={<ProtectedRoute element={<Evasion />} />} />
+                    <Route path="/operations" element={<ProtectedRoute element={<Operations />} />} />
+                    <Route path="/reporting" element={<ProtectedRoute element={<Reporting />} />} />
+                    <Route path="/campaign" element={<ProtectedRoute element={<Campaign />} />} />
+                    <Route path="/agents" element={<ProtectedRoute element={<Agents />} />} />
+                    <Route path="/admin" element={<AdminRoute element={<Admin />} isAdmin={isAdmin} />} />
+                    <Route path="/attack-path/:simId" element={<ProtectedRoute element={<AttackPath />} />} />
+                    <Route path="/attck-matrix" element={<ProtectedRoute element={<ATTCKMatrix />} />} />
+                    <Route path="/vulndb" element={<ProtectedRoute element={<VulnDB />} />} />
+                    <Route path="/cloud" element={<ProtectedRoute element={<Cloud />} />} />
+                  </Routes>
+                </Suspense>
+              </main>
+            </div>
           </div>
         </ErrorBoundary>
       </Router>

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { Download, Upload, X, Loader, BookOpen, Info, Shield, Eye, EyeOff } from 'lucide-react'
+import { Download, Upload, X, Loader, BookOpen, Info, Shield, Eye, EyeOff, Package } from 'lucide-react'
 import { useToast } from '../components/Toast'
 import api from '../api'
 
@@ -36,6 +36,110 @@ function getCategoryInfo(category) {
     if (category.toLowerCase().includes(key.toLowerCase())) return val
   }
   return { label: category, desc: '', color: 'text-gray-400', border: 'border-dark-600' }
+}
+
+function PayloadGenerator() {
+  const toast = useToast()
+  const [templates, setTemplates] = useState([])
+  const [encoder, setEncoder] = useState('xor')
+  const [fmt, setFmt] = useState('base64')
+  const [xorKey, setXorKey] = useState('')
+  const [iterations, setIterations] = useState(1)
+  const [result, setResult] = useState(null)
+  const [generating, setGenerating] = useState(false)
+
+  useEffect(() => {
+    api.get('/api/payload/templates').then(r => setTemplates(r.data.templates || [])).catch(() => {})
+  }, [])
+
+  const generate = () => {
+    setGenerating(true)
+    api.post('/api/payload/generate', {
+      payload_type: 'test_eicar',
+      encoder,
+      output_format: fmt,
+      xor_key: xorKey || undefined,
+      iterations,
+    }).then(r => {
+      setResult(r.data)
+      toast('Payload gerado com sucesso', 'success')
+    }).catch(e => toast(e.response?.data?.detail || 'Erro ao gerar payload', 'error'))
+    .finally(() => setGenerating(false))
+  }
+
+  const copyStub = () => {
+    if (result?.stub) { navigator.clipboard.writeText(result.stub); toast('Copiado!', 'success') }
+  }
+
+  return (
+    <div className="card-dark p-6">
+      <div className="flex items-center gap-2 mb-1">
+        <Shield className="w-5 h-5 text-purple-400" />
+        <h2 className="text-2xl font-bold text-gray-100">Gerador de Payloads</h2>
+      </div>
+      <p className="text-gray-400 text-sm mb-5">Gera artefatos de teste codificados (XOR/AES) para validar detecção de EDR/AV. Todos os payloads são inofensivos.</p>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+        <div>
+          <label className="block text-xs text-gray-400 mb-1">Encoder</label>
+          <select className="select-dark w-full" value={encoder} onChange={e => setEncoder(e.target.value)}>
+            <option value="xor">XOR</option>
+            <option value="aes">AES-CBC (simulado)</option>
+            <option value="b64_multi">Base64 Multi-layer</option>
+            <option value="rot13">ROT13 hex</option>
+            <option value="none">Nenhum (raw)</option>
+          </select>
+        </div>
+        <div>
+          <label className="block text-xs text-gray-400 mb-1">Formato de saída</label>
+          <select className="select-dark w-full" value={fmt} onChange={e => setFmt(e.target.value)}>
+            <option value="base64">Base64</option>
+            <option value="hex">Hex</option>
+            <option value="python">Stub Python</option>
+            <option value="powershell">Stub PowerShell</option>
+            <option value="csharp">Stub C#</option>
+          </select>
+        </div>
+        <div>
+          <label className="block text-xs text-gray-400 mb-1">Iterações (1–5)</label>
+          <input type="number" min={1} max={5} className="input-dark w-full" value={iterations} onChange={e => setIterations(Number(e.target.value))} />
+        </div>
+      </div>
+      {encoder === 'xor' && (
+        <div className="mb-4">
+          <label className="block text-xs text-gray-400 mb-1">XOR Key <span className="text-gray-600">(deixe vazio para gerar aleatória)</span></label>
+          <input className="input-dark w-full font-mono" placeholder="ex: mysecretkey" value={xorKey} onChange={e => setXorKey(e.target.value)} />
+        </div>
+      )}
+      <button onClick={generate} disabled={generating} className="btn-blue flex items-center gap-2 disabled:opacity-50">
+        {generating ? <Loader className="w-4 h-4 animate-spin" /> : <Shield className="w-4 h-4" />}
+        {generating ? 'Gerando...' : 'Gerar Payload'}
+      </button>
+      {result && (
+        <div className="mt-5 space-y-3">
+          <div className="grid grid-cols-3 gap-3 text-xs">
+            <div className="card-dark p-3"><p className="text-gray-500">Encoder</p><p className="text-gray-100 font-mono">{result.encoder}</p></div>
+            <div className="card-dark p-3"><p className="text-gray-500">Tamanho</p><p className="text-gray-100 font-mono">{result.size_bytes}B</p></div>
+            <div className="card-dark p-3"><p className="text-gray-500">SHA-256</p><p className="text-gray-100 font-mono truncate">{result.hash_sha256?.slice(0,16)}...</p></div>
+          </div>
+          {result.key_info && (
+            <div className="bg-dark-700 rounded p-3 text-xs font-mono text-gray-300">
+              <p className="text-gray-500 mb-1">Key info:</p>
+              {Object.entries(result.key_info).map(([k, v]) => <p key={k}><span className="text-gray-500">{k}:</span> {String(v)}</p>)}
+            </div>
+          )}
+          <div className="relative">
+            <pre className="bg-dark-900 border border-dark-600 rounded p-3 text-xs text-green-300 font-mono overflow-x-auto max-h-48 overflow-y-auto">
+              {result.stub || result.payload_b64}
+            </pre>
+            <button onClick={copyStub} className="absolute top-2 right-2 text-[10px] px-2 py-1 bg-dark-700 hover:bg-dark-600 text-gray-400 rounded">
+              Copiar
+            </button>
+          </div>
+          <p className="text-[10px] text-gray-600 italic">{result.note}</p>
+        </div>
+      )}
+    </div>
+  )
 }
 
 export default function Evasion() {
@@ -233,6 +337,9 @@ export default function Evasion() {
           </div>
         )}
       </div>
+
+      {/* Payload Generator */}
+      <PayloadGenerator />
 
       {/* Arquivos de Teste (Payloads) */}
       <div className="card-dark p-6">
