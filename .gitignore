@@ -107,3 +107,12 @@ frontend/node_modules/
 
 # Evidências forenses geradas em runtime (dados sensíveis do ambiente)
 evidence/
+
+# Caches e snapshots de runtime (gerados automaticamente)
+_edr_pending.json
+_kev_snapshot.json
+_kev_cache.json
+_epss_cache.json
+
+# Claude Code internals
+.claude/
