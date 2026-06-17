@@ -42,6 +42,7 @@ const RealExecution = lazy(() => import('./pages/RealExecution'))
 const MSSP = lazy(() => import('./pages/MSSP'))
 const ADAttacks = lazy(() => import('./pages/ADAttacks'))
 const Billing = lazy(() => import('./pages/Billing'))
+const Landing = lazy(() => import('./pages/Landing'))
 
 const SSOCallback = ({ onLoginSuccess }) => {
   const [status, setStatus] = React.useState('processing')
@@ -142,7 +143,7 @@ export default function App() {
                 <Suspense fallback={<PageLoader />}>
                   <Routes>
                     <Route path="/login" element={<Login onLoginSuccess={handleLoginSuccess} />} />
-                    <Route path="/" element={<ProtectedRoute element={<Dashboard />} />} />
+                    <Route path="/" element={isAuthenticated ? <Navigate to="/dashboard" replace /> : <Landing />} />
                     <Route path="/dashboard" element={<ProtectedRoute element={<Dashboard />} />} />
                     <Route path="/recon" element={<ProtectedRoute element={<Recon />} />} />
                     <Route path="/ddos" element={<ProtectedRoute element={<DDoS />} />} />
@@ -164,7 +165,7 @@ export default function App() {
                     <Route path="/soc-validation" element={<ProtectedRoute element={<SOCValidation />} />} />
                     <Route path="/remediation" element={<ProtectedRoute element={<Remediation />} />} />
                     <Route path="/integrations" element={<ProtectedRoute element={<Integrations />} />} />
-                    <Route path="/pricing" element={<Pricing />} />
+                    <Route path="/pricing" element={<Navigate to="/" replace />} />
                     <Route path="/cloud-identity" element={<ProtectedRoute element={<CloudIdentity />} />} />
                     <Route path="/ai" element={<ProtectedRoute element={<AI />} />} />
                     <Route path="/apt" element={<ProtectedRoute element={<APT />} />} />
