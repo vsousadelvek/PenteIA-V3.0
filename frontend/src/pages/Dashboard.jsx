@@ -15,7 +15,7 @@ const MODULE_INFO = [
   { name: 'Evasão de Defesas', icon: Shield, color: 'purple', href: '/evasion', tip: 'Anti-AV / EDR', description: 'Testa se AV/EDR detecta técnicas avançadas de evasão de defesas.' },
   { name: 'Relatórios', icon: FileText, color: 'blue', href: '/reporting', tip: 'PDF + Compliance', description: 'Gera relatórios profissionais e mapeia achados para LGPD, ISO 27001, PCI DSS.' },
   { name: 'Histórico de Operações', icon: Activity, color: 'yellow', href: '/operations', tip: 'Log completo', description: 'Registro completo de todas as operações com data, hora e resultado.' },
-  { name: 'Attack Path (Grafo)', icon: GitBranch, color: 'teal', href: '/bas', tip: 'Novo', description: 'Visualização gráfica do caminho de ataque com todos os vetores explorados.' },
+  { name: 'Attack Path (Grafo)', icon: GitBranch, color: 'teal', href: '/ad-attacks', tip: 'Novo', description: 'Visualização gráfica do caminho de ataque com todos os vetores explorados.' },
 ]
 
 const COLOR_MAP = {

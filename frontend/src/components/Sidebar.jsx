@@ -81,12 +81,6 @@ const GROUPS = [
     ],
   },
   {
-    label: 'Purple Team',
-    items: [
-      { path: '/purple-team', label: 'Purple Team', Icon: Shield },
-    ],
-  },
-  {
     label: 'Automação',
     items: [
       { path: '/scheduled-bas', label: 'BAS Agendado', Icon: Calendar },

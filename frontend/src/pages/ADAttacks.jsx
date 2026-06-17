@@ -7,7 +7,7 @@ import {
 import { useNavigate } from 'react-router-dom'
 import { useToast } from '../components/Toast'
 import api from '../api'
-import { ReactFlow, Background, Controls, Handle, Position } from '@xyflow/react'
+import { ReactFlow, Background, Controls } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 
 // ---------------------------------------------------------------------------
