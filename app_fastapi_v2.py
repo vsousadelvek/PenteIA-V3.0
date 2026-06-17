@@ -6599,6 +6599,13 @@ except Exception as _e:
     import logging as _logging
     _logging.getLogger("penteia").warning(f"ext_router_v5 not loaded: {_e}")
 
+try:
+    from ext_router_v6 import ext_router_v6 as _ext_router_v6
+    app.include_router(_ext_router_v6, prefix="/api")
+except Exception as _e:
+    import logging as _logging
+    _logging.getLogger("penteia").warning(f"ext_router_v6 not loaded: {_e}")
+
 
 # ── Root ─────────────────────────────────────────────────────────────────────
 
