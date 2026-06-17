@@ -1,0 +1,64 @@
+{
+  "execution_id": "24475fc5-b2c0-4efb-a491-b2cfcbee76bd",
+  "technique_id": "T1518",
+  "target": "localhost",
+  "mode": "safe",
+  "started_at": "2026-06-17T02:55:00.282510",
+  "completed_at": "2026-06-17T02:55:00.336451",
+  "system_context": {
+    "hostname": "del",
+    "os": "Windows",
+    "os_version": "10.0.26200",
+    "python_version": "3.14.3",
+    "arch": "AMD64",
+    "collected_at": "2026-06-17T02:55:00.336472"
+  },
+  "technique_evidence": {
+    "technique": "T1518",
+    "software": [
+      "Docker Desktop",
+      "Git",
+      "Riot Vanguard",
+      "HUMANKINDT",
+      "Total War: WARHAMMER III",
+      "Age of Empires IV: Anniversary Edition",
+      "Kingdom Come: Deliverance II",
+      "Watch_Dogs",
+      "Mount & Blade II: Bannerlord",
+      "Stellaris",
+      "Sid Meier's Civilization VI",
+      "Europa Universalis V",
+      "Northgard: Definitive Edition",
+      "Warhammer 40,000: Gladius - Relics of War",
+      "Python 3.12.10 Executables (64-bit)",
+      "Python 3.12.10 Test Suite (64-bit)",
+      "Microsoft Visual C++ 2022 X64 Debug Runtime - 14.50.35719",
+      "Microsoft GameInput",
+      "Python 3.12.10 Documentation (64-bit)",
+      "Microsoft Visual C++ 2010  x64 Redistributable - 10.0.40219",
+      "Windows App Certification Kit Native Components",
+      "Microsoft Visual C++ 2012 x64 Additional Runtime - 11.0.61030",
+      "Python 3.14.3 Standard Library (64-bit)",
+      "Python 3.12.10 Add to Path (64-bit)",
+      "Python 3.14.3 Core Interpreter (64-bit)"
+    ],
+    "vulnerable_count": 0,
+    "artifacts": [
+      {
+        "type": "software_inventory",
+        "description": "25 softwares detectados",
+        "risk": "Outdated software versions expose known CVEs; remote access tools enable lateral movement"
+      }
+    ],
+    "risky_installed": [
+      "Git",
+      "Python 3.12.10 Executables (64-bit)",
+      "Python 3.12.10 Test Suite (64-bit)",
+      "Python 3.12.10 Documentation (64-bit)",
+      "Python 3.14.3 Standard Library (64-bit)",
+      "Python 3.12.10 Add to Path (64-bit)",
+      "Python 3.14.3 Core Interpreter (64-bit)"
+    ]
+  },
+  "status": "completed"
+}

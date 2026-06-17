@@ -579,6 +579,24 @@ _TECHNIQUE_META = {
     "T1087b": {"cvss": 7.5, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N", "severity": "High",
                "compliance": ["OWASP A05:2021", "PCI-DSS 6.4.3", "NIST CM-7"],
                "remediation": "Bloquear acesso a .git, .env, .htaccess e backups via configuração nginx/Apache (deny all)."},
+    "T1499b": {"cvss": 7.5, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:H", "severity": "High",
+               "compliance": ["OWASP A04:2021", "PCI-DSS 6.4.3", "NIST SC-5"],
+               "remediation": "Configurar nginx para usar $binary_remote_addr (não $http_x_forwarded_for) nas zonas de rate limiting. Adicionar set_real_ip_from apenas para proxies confiáveis."},
+    "T1592c": {"cvss": 5.3, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N", "severity": "Medium",
+               "compliance": ["OWASP A05:2021", "PCI-DSS 6.4.3", "NIST CM-7"],
+               "remediation": "Remover ou restringir o endpoint /api/status a redes internas. Não expor versão, ambiente (env) ou nome do servidor em respostas públicas."},
+    "T1592d": {"cvss": 6.5, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N", "severity": "Medium",
+               "compliance": ["OWASP A05:2021", "PCI-DSS 6.4.3", "NIST CM-7"],
+               "remediation": "Proteger endpoints de métricas (/metrics, /api/v*/metrics) com autenticação. Considerar expô-los apenas em rede interna ou via sidecar autenticado (Prometheus + basicauth)."},
+    "T1596b": {"cvss": 4.0, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N", "severity": "Low",
+               "compliance": ["OWASP A05:2021", "NIST CM-7"],
+               "remediation": "Revisar robots.txt para não expor paths sensíveis. Publicar security.txt (RFC 9116) com contato de responsible disclosure."},
+    "T1557b": {"cvss": 6.4, "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:H/A:N", "severity": "Medium",
+               "compliance": ["OWASP A03:2021", "NIST SI-10"],
+               "remediation": "Nunca usar o header Host diretamente em redirects ou respostas. Configurar server_name explícito no nginx. Usar $server_name em vez de $http_host."},
+    "T1190f": {"cvss": 8.1, "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N", "severity": "High",
+               "compliance": ["OWASP A02:2021", "PCI-DSS 6.4.1", "NIST SI-10"],
+               "remediation": "Atualizar nginx para versão >= 1.25. Configurar proxy_request_buffering on e limitar métodos permitidos. Usar WAF com regras de HTTP smuggling."},
 }
 
 
@@ -985,6 +1003,180 @@ def _bas_run(sim_id: str, playbook_name: str, target: str, severity: str, num_te
                "http_status": t17_http,
                "detail": t17_detail}
         techniques.append(t17)
+
+        # T18: Rate Limit Bypass via X-Forwarded-For (spoof IP para escapar do rate limit)
+        # Envia 50 requests fingindo ser IPs diferentes — se nenhum 429, bypass confirmado
+        codes18 = []
+        for i in range(50):
+            spoofed_ip = f"10.0.{i // 256}.{i % 256}"
+            rr = probe("/api/v1/users", headers={"X-Forwarded-For": spoofed_ip, "X-Real-IP": spoofed_ip})
+            if rr is not None:
+                codes18.append(rr.status_code)
+        if not codes18:
+            t18_status = "unknown"
+            t18_detail = "Serviço inacessível — bypass não verificável"
+        elif 429 not in codes18:
+            t18_status = "found"
+            t18_detail = f"Rate limit bypassado via X-Forwarded-For — {len(codes18)} requests sem 429 (IP spoofing aceito)"
+            hits += 1
+        else:
+            first_429 = next((i + 1 for i, c in enumerate(codes18) if c == 429), None)
+            t18_status = "blocked"
+            t18_detail = f"Rate limit resiste ao X-Forwarded-For spoofing — 429 no request #{first_429}"
+        t18 = {"id": "T1499b", "name": "Rate Limit Bypass (X-Forwarded-For)",
+               "status": t18_status,
+               "http_status": codes18[-1] if codes18 else 0,
+               "detail": t18_detail}
+        techniques.append(t18)
+
+        # T19: API Info Disclosure — /api/v1/status vaza env, versão e nome do server
+        r19 = probe("/api/v1/status")
+        if r19 is None:
+            t19_status, t19_detail = "unknown", "Endpoint /api/v1/status inacessível"
+        elif r19.status_code == 200:
+            try:
+                body = r19.json()
+            except Exception:
+                body = {}
+            leaks = []
+            if body.get("env"):    leaks.append(f"env={body['env']}")
+            if body.get("version"): leaks.append(f"version={body['version']}")
+            if body.get("server"):  leaks.append(f"server={body['server']}")
+            if leaks:
+                t19_status = "found"
+                t19_detail = f"API /status expõe informações sensíveis: {', '.join(leaks)}"
+                hits += 1
+            else:
+                t19_status = "blocked"
+                t19_detail = "API /status acessível mas sem dados sensíveis"
+        else:
+            t19_status = "blocked"
+            t19_detail = f"API /status retornou HTTP {r19.status_code}"
+        t19 = {"id": "T1592c", "name": "API Info Disclosure (/api/v1/status)",
+               "status": t19_status,
+               "http_status": r19.status_code if r19 is not None else 0,
+               "detail": t19_detail}
+        techniques.append(t19)
+
+        # T20: API v2 Metrics Disclosure — /api/v2/metrics vaza métricas de produção
+        r20 = probe("/api/v2/metrics")
+        if r20 is None:
+            t20_status, t20_detail = "unknown", "Endpoint /api/v2/metrics inacessível"
+        elif r20.status_code == 200:
+            try:
+                body20 = r20.json()
+            except Exception:
+                body20 = {}
+            leaked_keys = [k for k in ("requests_total", "errors_total", "avg_latency_ms", "uptime_s") if k in body20]
+            if leaked_keys:
+                t20_status = "found"
+                t20_detail = f"Métricas internas expostas sem auth: {', '.join(f'{k}={body20[k]}' for k in leaked_keys)}"
+                hits += 1
+            else:
+                t20_status = "blocked"
+                t20_detail = "Endpoint /api/v2/metrics acessível mas sem dados reconhecíveis"
+        else:
+            t20_status = "blocked"
+            t20_detail = f"Métricas protegidas (HTTP {r20.status_code})"
+        t20 = {"id": "T1592d", "name": "API v2 Metrics Disclosure",
+               "status": t20_status,
+               "http_status": r20.status_code if r20 is not None else 0,
+               "detail": t20_detail}
+        techniques.append(t20)
+
+        # T21: Recon via robots.txt e security.txt
+        recon_exposed = []
+        recon_last_http = 0
+        for rpath in ("/robots.txt", "/.well-known/security.txt", "/sitemap.xml"):
+            rr21 = probe(rpath)
+            if rr21 is not None:
+                recon_last_http = rr21.status_code
+                if rr21.status_code == 200 and len(rr21.content or b"") > 10:
+                    recon_exposed.append(f"{rpath} ({len(rr21.content)}b)")
+        if recon_exposed:
+            t21_status = "found"
+            t21_detail = f"Arquivos de recon públicos: {', '.join(recon_exposed)}"
+            hits += 1
+        else:
+            t21_status = "blocked"
+            t21_detail = "robots.txt / security.txt / sitemap.xml não expostos (404)"
+        t21 = {"id": "T1596b", "name": "Recon via robots.txt / security.txt",
+               "status": t21_status,
+               "http_status": recon_last_http,
+               "detail": t21_detail}
+        techniques.append(t21)
+
+        # T22: Host Header Injection (testa se Host é refletido em Location redirect)
+        evil_host = "evil-pentest.internal"
+        r22 = probe("/", headers={"Host": evil_host})
+        if r22 is None:
+            t22_status, t22_detail = "unknown", "Serviço inacessível — Host injection não verificável"
+        else:
+            location = r22.headers.get("Location", "")
+            reflected = evil_host in location or evil_host in (r22.content or b"").decode("utf-8", errors="ignore")
+            if reflected:
+                t22_status = "found"
+                t22_detail = f"Host header refletido no redirect: Location={location}"
+                hits += 1
+            else:
+                t22_status = "blocked"
+                t22_detail = f"Host header não refletido (HTTP {r22.status_code}, Location={location or 'n/a'})"
+        t22 = {"id": "T1557b", "name": "Host Header Injection",
+               "status": t22_status,
+               "http_status": r22.status_code if r22 is not None else 0,
+               "detail": t22_detail}
+        techniques.append(t22)
+
+        # T23: HTTP Request Smuggling — probe CL.TE (Content-Length + Transfer-Encoding conflitantes)
+        # Um 400 imediato ou timeout indica parser estrito; 200/timeout com resposta dividida = vuln
+        try:
+            import socket as _sock, ssl as _ssl
+            parsed = base.replace("https://", "").replace("http://", "").split(":")
+            smug_host = parsed[0]
+            smug_port = int(parsed[1]) if len(parsed) > 1 else 80
+            s23 = _sock.create_connection((smug_host, smug_port), timeout=5)
+            smuggle_req = (
+                "POST / HTTP/1.1\r\n"
+                f"Host: {smug_host}\r\n"
+                "Content-Type: application/x-www-form-urlencoded\r\n"
+                "Content-Length: 6\r\n"
+                "Transfer-Encoding: chunked\r\n"
+                "\r\n"
+                "0\r\n"
+                "\r\n"
+                "X"
+            )
+            s23.sendall(smuggle_req.encode())
+            resp23 = b""
+            s23.settimeout(3)
+            try:
+                while True:
+                    chunk = s23.recv(512)
+                    if not chunk:
+                        break
+                    resp23 += chunk
+            except Exception:
+                pass
+            s23.close()
+            resp_str = resp23.decode("utf-8", errors="ignore")
+            if "400" in resp_str[:20]:
+                t23_status = "blocked"
+                t23_detail = "HTTP Request Smuggling rejeitado — servidor retornou 400 Bad Request para CL.TE"
+            elif "200" in resp_str[:20] or "301" in resp_str[:20]:
+                t23_status = "found"
+                t23_detail = "Possível HTTP Request Smuggling — servidor aceitou request CL.TE conflitante"
+                hits += 1
+            else:
+                t23_status = "blocked"
+                t23_detail = f"CL.TE probe: resposta {resp_str[:50].strip()!r} — parser estrito"
+        except Exception as e23:
+            t23_status = "unknown"
+            t23_detail = f"HTTP Smuggling probe falhou: {str(e23)[:80]}"
+        t23 = {"id": "T1190f", "name": "HTTP Request Smuggling (CL.TE)",
+               "status": t23_status,
+               "http_status": 0,
+               "detail": t23_detail}
+        techniques.append(t23)
 
     # Enriquecer todas as técnicas com CVSS, compliance e remediação
     for t in techniques:

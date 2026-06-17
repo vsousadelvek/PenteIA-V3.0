@@ -1,0 +1,53 @@
+{
+  "execution_id": "bcfeba6a-5ba7-4636-9588-85d5ae96b646",
+  "technique_id": "T1070",
+  "target": "localhost",
+  "mode": "safe",
+  "started_at": "2026-06-17T02:39:49.084617",
+  "completed_at": "2026-06-17T02:39:49.094740",
+  "system_context": {
+    "hostname": "del",
+    "os": "Windows",
+    "os_version": "10.0.26200",
+    "python_version": "3.14.3",
+    "arch": "AMD64",
+    "collected_at": "2026-06-17T02:39:49.094759"
+  },
+  "technique_evidence": {
+    "technique": "T1070",
+    "artifacts": [
+      {
+        "type": "edr_validation",
+        "description": "Created/deleted penteia_edr_test_1781663989.tmp with suspicious strings to test EDR write-detection",
+        "risk": "If not alerted: EDR has file write detection gap — real malware staging would go undetected"
+      }
+    ],
+    "edr_test": {
+      "file_written": "penteia_edr_test_1781663989.tmp",
+      "suspicious_strings": [
+        "InvokeExpression",
+        "Mimikatz",
+        "SECRET_KEY"
+      ],
+      "edr_should_alert": true,
+      "note": "If EDR did NOT alert on this file, detection gap confirmed"
+    },
+    "phases": [
+      {
+        "phase": "create",
+        "status": "success",
+        "path": "C:\\Users\\delve\\AppData\\Local\\Temp\\penteia_edr_test_1781663989.tmp"
+      },
+      {
+        "phase": "read",
+        "status": "success",
+        "bytes": 60
+      },
+      {
+        "phase": "delete",
+        "status": "success"
+      }
+    ]
+  },
+  "status": "completed"
+}

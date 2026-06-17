@@ -1,0 +1,29 @@
+{
+  "execution_id": "3fee208d-4e1c-40cb-8bab-0904d838929e",
+  "technique_id": "T1552",
+  "target": "localhost",
+  "mode": "safe",
+  "started_at": "2026-06-17T02:55:02.361266",
+  "completed_at": "2026-06-17T02:55:02.363037",
+  "system_context": {
+    "hostname": "del",
+    "os": "Windows",
+    "os_version": "10.0.26200",
+    "python_version": "3.14.3",
+    "arch": "AMD64",
+    "collected_at": "2026-06-17T02:55:02.363054"
+  },
+  "technique_evidence": {
+    "technique": "T1552",
+    "credential_files": [],
+    "findings": [],
+    "artifacts": [
+      {
+        "type": "credential_scan",
+        "description": "0 arquivos com possíveis credenciais",
+        "risk": "Plaintext credentials enable direct account compromise without brute force"
+      }
+    ]
+  },
+  "status": "completed"
+}

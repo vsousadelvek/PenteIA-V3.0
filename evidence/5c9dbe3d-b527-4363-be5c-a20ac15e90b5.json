@@ -1,0 +1,29 @@
+{
+  "execution_id": "5c9dbe3d-b527-4363-be5c-a20ac15e90b5",
+  "technique_id": "T1007",
+  "target": "localhost",
+  "mode": "safe",
+  "started_at": "2026-06-17T02:53:36.481117",
+  "completed_at": "2026-06-17T02:53:36.547488",
+  "system_context": {
+    "hostname": "del",
+    "os": "Windows",
+    "os_version": "10.0.26200",
+    "python_version": "3.14.3",
+    "arch": "AMD64",
+    "collected_at": "2026-06-17T02:53:36.547507"
+  },
+  "technique_evidence": {
+    "technique": "T1007",
+    "services": [],
+    "vulnerable_services": [],
+    "artifacts": [
+      {
+        "type": "service_enumeration",
+        "description": "0 serviços; 0 potencialmente vulneráveis",
+        "risk": "Service inventory captured"
+      }
+    ]
+  },
+  "status": "completed"
+}
