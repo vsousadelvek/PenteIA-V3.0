@@ -26,6 +26,8 @@ logger = logging.getLogger("penteia.execution")
 EVIDENCE_DIR = Path(__file__).parent / "evidence"
 EVIDENCE_DIR.mkdir(exist_ok=True)
 
+_DIR = os.path.dirname(os.path.abspath(__file__))
+
 WINDOWS = platform.system() == "Windows"
 
 # ── Safe technique implementations ───────────────────────────────────────────
@@ -285,6 +287,7 @@ def _technique_indicator_removal(target: str, mode: str) -> dict:
     tmp_dir = tempfile.gettempdir()
     test_filename = f"penteia_edr_test_{int(time.time())}.tmp"
     test_path = os.path.join(tmp_dir, test_filename)
+    edr_record_path = os.path.join(_DIR, "_edr_pending.json")
 
     phases = []
     try:
@@ -302,12 +305,32 @@ def _technique_indicator_removal(target: str, mode: str) -> dict:
         os.remove(test_path)
         phases.append({"phase": "delete", "status": "success"})
 
-        evidence["edr_test"] = {
+        edr_record = {
             "file_written": test_filename,
             "suspicious_strings": ["InvokeExpression", "Mimikatz", "SECRET_KEY"],
             "edr_should_alert": True,
             "note": "If EDR did NOT alert on this file, detection gap confirmed",
+            "executed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "edr_alerted": None,
+            "edr_alert_time": None,
+            "detection_gap_confirmed": None,
         }
+        evidence["edr_test"] = edr_record
+
+        # Persist pending EDR check so the /edr-check endpoint can update it
+        try:
+            try:
+                with open(edr_record_path, "r", encoding="utf-8") as fh:
+                    pending = json.load(fh)
+            except Exception:
+                pending = {}
+            # key = execution_id will be set by caller; use timestamp as fallback key
+            pending[test_filename] = edr_record
+            with open(edr_record_path, "w", encoding="utf-8") as fh:
+                json.dump(pending, fh, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
     except Exception as e:
         phases.append({"phase": "error", "error": str(e)})
 
@@ -316,6 +339,7 @@ def _technique_indicator_removal(target: str, mode: str) -> dict:
         "type": "edr_validation",
         "description": f"Created/deleted {test_filename} with suspicious strings to test EDR write-detection",
         "risk": "If not alerted: EDR has file write detection gap — real malware staging would go undetected",
+        "edr_check_endpoint": f"/api/execution/edr-check/{test_filename}",
     })
     return evidence
 
