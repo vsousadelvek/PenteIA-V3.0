@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { Download, FileText, Plus, Loader, BookOpen, Info, Shield, CheckCircle } from 'lucide-react'
+import { Download, FileText, Plus, Loader, BookOpen, Info, Shield, CheckCircle, FileDown, Building2, BarChart2 } from 'lucide-react'
 import { useToast } from '../components/Toast'
 import api from '../api'
 
@@ -106,6 +106,75 @@ export default function Reporting() {
 
   const selectedTemplate = TEMPLATES.find(t => t.name === formData.template)
 
+  // Executive PDF state
+  const [execForm, setExecForm] = useState({
+    organization: '',
+    period_start: '',
+    period_end: '',
+    sector: 'general',
+    prepared_by: '',
+  })
+  const [execGenerating, setExecGenerating] = useState(false)
+  const [benchmark, setBenchmark] = useState(null)
+  const [benchmarkLoading, setBenchmarkLoading] = useState(false)
+
+  const SECTORS = [
+    { value: 'financial',   label: 'Financeiro' },
+    { value: 'healthcare',  label: 'Saúde' },
+    { value: 'retail',      label: 'Varejo' },
+    { value: 'government',  label: 'Governo' },
+    { value: 'technology',  label: 'Tecnologia' },
+    { value: 'energy',      label: 'Energia' },
+    { value: 'general',     label: 'Geral' },
+  ]
+
+  const fetchBenchmark = async (sector) => {
+    setBenchmarkLoading(true)
+    setBenchmark(null)
+    try {
+      const res = await api.get(`/api/reports/benchmarks/${sector}`)
+      setBenchmark(res.data)
+    } catch (err) {
+      toast('Erro ao buscar benchmark: ' + (err.response?.data?.detail || err.message), 'error')
+    } finally {
+      setBenchmarkLoading(false)
+    }
+  }
+
+  const handleSectorChange = (sector) => {
+    setExecForm(f => ({ ...f, sector }))
+    fetchBenchmark(sector)
+  }
+
+  const handleExecPdf = async () => {
+    if (!execForm.organization.trim()) {
+      toast('Informe o nome da organização', 'warning')
+      return
+    }
+    if (!execForm.period_start || !execForm.period_end) {
+      toast('Informe o período do relatório', 'warning')
+      return
+    }
+    setExecGenerating(true)
+    try {
+      const res = await api.post('/api/reports/executive/pdf', execForm, { responseType: 'blob' })
+      const url = window.URL.createObjectURL(new Blob([res.data], { type: 'application/pdf' }))
+      const link = document.createElement('a')
+      link.href = url
+      const orgSlug = execForm.organization.replace(/[^a-z0-9]/gi, '_').toLowerCase()
+      link.setAttribute('download', `relatorio_executivo_${orgSlug}.pdf`)
+      document.body.appendChild(link)
+      link.click()
+      link.parentNode.removeChild(link)
+      window.URL.revokeObjectURL(url)
+      toast('Relatório Executivo gerado com sucesso!', 'success')
+    } catch (err) {
+      toast('Erro ao gerar PDF Executivo: ' + (err.response?.data?.detail || err.message), 'error')
+    } finally {
+      setExecGenerating(false)
+    }
+  }
+
   useEffect(() => {
     fetchReports()
     api.get('/api/bas/simulations').then(r => {
@@ -195,6 +264,164 @@ export default function Reporting() {
       <div className="slide-in">
         <h1 className="text-4xl font-bold text-gray-100 mb-2">Relatórios</h1>
         <p className="text-gray-400">Gere documentos profissionais com os resultados dos testes de segurança</p>
+      </div>
+
+      {/* ── Relatório Executivo para Board ─────────────────────────────── */}
+      <div className="card-dark p-6 border-2 border-purple-600/40">
+        <div className="flex items-center gap-3 mb-5">
+          <Building2 className="w-6 h-6 text-purple-400" />
+          <div>
+            <h2 className="text-2xl font-bold text-gray-100">Relatório Executivo para Board</h2>
+            <p className="text-gray-400 text-sm mt-0.5">Gere um PDF executivo formatado para apresentação à diretoria, com comparativo de benchmark setorial.</p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5 mb-6">
+          {/* Organização */}
+          <div className="lg:col-span-3">
+            <label className="block text-sm font-medium text-gray-300 mb-1">Nome da Organização</label>
+            <div className="flex items-center gap-2">
+              <Building2 className="w-4 h-4 text-gray-500 shrink-0" />
+              <input
+                type="text"
+                value={execForm.organization}
+                onChange={e => setExecForm(f => ({ ...f, organization: e.target.value }))}
+                placeholder="ex: Empresa ABC Ltda."
+                className="input-dark w-full"
+                disabled={execGenerating}
+              />
+            </div>
+          </div>
+
+          {/* Período início */}
+          <div>
+            <label className="block text-sm font-medium text-gray-300 mb-1">Início do Período</label>
+            <input
+              type="date"
+              value={execForm.period_start}
+              onChange={e => setExecForm(f => ({ ...f, period_start: e.target.value }))}
+              className="input-dark w-full"
+              disabled={execGenerating}
+            />
+          </div>
+
+          {/* Período fim */}
+          <div>
+            <label className="block text-sm font-medium text-gray-300 mb-1">Fim do Período</label>
+            <input
+              type="date"
+              value={execForm.period_end}
+              onChange={e => setExecForm(f => ({ ...f, period_end: e.target.value }))}
+              className="input-dark w-full"
+              disabled={execGenerating}
+            />
+          </div>
+
+          {/* Setor */}
+          <div>
+            <label className="block text-sm font-medium text-gray-300 mb-1">Setor</label>
+            <select
+              value={execForm.sector}
+              onChange={e => handleSectorChange(e.target.value)}
+              className="select-dark w-full"
+              disabled={execGenerating}
+            >
+              {SECTORS.map(s => (
+                <option key={s.value} value={s.value}>{s.label}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Preparado por */}
+          <div className="md:col-span-2 lg:col-span-3">
+            <label className="block text-sm font-medium text-gray-300 mb-1">Preparado por</label>
+            <input
+              type="text"
+              value={execForm.prepared_by}
+              onChange={e => setExecForm(f => ({ ...f, prepared_by: e.target.value }))}
+              placeholder="ex: João Silva — Analista de Segurança"
+              className="input-dark w-full"
+              disabled={execGenerating}
+            />
+          </div>
+        </div>
+
+        {/* Benchmark widget */}
+        <div className="mb-6">
+          <div className="flex items-center gap-2 mb-3">
+            <BarChart2 className="w-5 h-5 text-purple-400" />
+            <h3 className="text-base font-semibold text-gray-200">Sua org vs benchmark do setor</h3>
+            {!benchmark && !benchmarkLoading && (
+              <button
+                onClick={() => fetchBenchmark(execForm.sector)}
+                className="ml-auto text-xs text-purple-400 hover:text-purple-300 underline transition"
+              >
+                Carregar benchmark
+              </button>
+            )}
+          </div>
+
+          {benchmarkLoading && (
+            <div className="flex items-center gap-2 text-gray-400 text-sm py-4">
+              <Loader className="w-4 h-4 animate-spin text-purple-400" />
+              Buscando dados do setor...
+            </div>
+          )}
+
+          {benchmark && !benchmarkLoading && (() => {
+            const sectorAvg  = benchmark.sector_average  ?? benchmark.average ?? null
+            const top25      = benchmark.top_25_percent  ?? benchmark.top25   ?? null
+            const orgScore   = benchmark.your_score      ?? benchmark.org_score ?? null
+            const diffRaw    = (orgScore !== null && sectorAvg !== null) ? orgScore - sectorAvg : null
+            const diffSign   = diffRaw !== null ? (diffRaw >= 0 ? 'acima' : 'abaixo') : null
+            const diffColor  = diffRaw !== null ? (diffRaw >= 0 ? 'text-green-400' : 'text-red-400') : 'text-gray-400'
+            const sectorLabel = SECTORS.find(s => s.value === execForm.sector)?.label ?? execForm.sector
+
+            return (
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 bg-dark-700 rounded-lg p-4 border border-purple-600/30">
+                <div className="text-center">
+                  <p className="text-xs text-gray-500 mb-1">Media do setor ({sectorLabel})</p>
+                  <p className="text-2xl font-bold text-gray-100">
+                    {sectorAvg !== null ? `${Number(sectorAvg).toFixed(1)}%` : '—'}
+                  </p>
+                </div>
+                <div className="text-center">
+                  <p className="text-xs text-gray-500 mb-1">Top 25%</p>
+                  <p className="text-2xl font-bold text-yellow-400">
+                    {top25 !== null ? `${Number(top25).toFixed(1)}%` : '—'}
+                  </p>
+                </div>
+                <div className="text-center">
+                  <p className="text-xs text-gray-500 mb-1">Posicionamento</p>
+                  {diffRaw !== null ? (
+                    <p className={`text-2xl font-bold ${diffColor}`}>
+                      {Math.abs(diffRaw).toFixed(1)}% {diffSign} da media
+                    </p>
+                  ) : (
+                    <p className="text-lg text-gray-500 pt-1">Score da org nao disponivel</p>
+                  )}
+                </div>
+              </div>
+            )
+          })()}
+
+          {!benchmark && !benchmarkLoading && (
+            <p className="text-xs text-gray-600 mt-1">Selecione um setor e clique em "Carregar benchmark" para ver a comparacao.</p>
+          )}
+        </div>
+
+        {/* Gerar PDF button */}
+        <button
+          onClick={handleExecPdf}
+          disabled={execGenerating}
+          className="w-full flex justify-center items-center gap-2 py-3 px-6 rounded-lg font-semibold text-white bg-purple-700 hover:bg-purple-600 disabled:opacity-50 transition"
+        >
+          {execGenerating ? (
+            <><Loader className="w-4 h-4 animate-spin" /> Gerando PDF Executivo...</>
+          ) : (
+            <><FileDown className="w-4 h-4" /> Gerar PDF Executivo</>
+          )}
+        </button>
       </div>
 
       {/* Guia */}

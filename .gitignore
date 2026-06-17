@@ -52,3 +52,55 @@ var/
 # Sistema operacional
 .DS_Store
 Thumbs.db
+
+# Logs do servidor (gerados em runtime)
+*.log
+*.err
+backend.log
+backend_err.log
+frontend.log
+frontend_err.log
+frontend_out.log
+target_err.log
+target_out.log
+uvicorn.log
+uvicorn.err
+uvicorn_err.log
+uvicorn_out.log
+frontend/vite.log
+frontend/vite.err
+
+# Bancos de dados locais (contêm dados sensíveis)
+*.db
+penteia_lab.db
+frontend/penteia_lab.db
+
+# Tokens e credenciais temporárias
+token.tmp
+
+# PDFs de teste gerados
+test_*.pdf
+
+# Dados gerados em runtime
+generated_*.json
+processed_*.json
+qa_screenshots/
+
+# Scripts de diagnóstico temporários
+_diag_*.py
+_fix_*.py
+_kill_*.py
+_tmp_*.py
+
+# Arquivos de teste com binários e relatórios gerados
+test_files/
+
+# Versões obsoletas do router (usar ext_router_v5.py)
+ext_router.py
+ext_router_v2.py
+ext_router_v3.py
+ext_router_v4.py
+
+# Node.js
+node_modules/
+frontend/node_modules/

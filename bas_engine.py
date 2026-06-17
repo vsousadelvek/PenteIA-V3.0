@@ -367,6 +367,28 @@ ALL_TECHNIQUES: List[MITRETechnique] = [
                    'Sobrescrita do MBR, partições ou disco completo para tornar sistema inoperável', 'critical'),
     MITRETechnique('T1529', 'System Shutdown/Reboot', MITRETactic.IMPACT,
                    'Forçar desligamento ou reboot de sistemas críticos para causar indisponibilidade', 'high'),
+
+    # ── BRASIL — Ameaças Endêmicas ────────────────────────────────────────────
+    MITRETechnique('BR-PIX-001', 'Pix Transaction Hijacking', MITRETactic.IMPACT,
+                   'Interceptação e redirecionamento de transações Pix via AiTM em apps bancários móveis', 'critical'),
+    MITRETechnique('BR-PIX-002', 'Pix QR Code Tampering', MITRETactic.COLLECTION,
+                   'Substituição de QR Codes Pix em e-commerce e PDVs para desvio de pagamentos', 'high'),
+    MITRETechnique('BR-PIX-003', 'Chave Pix Social Engineering', MITRETactic.INITIAL_ACCESS,
+                   'Engenharia social via WhatsApp/SMS para obter chaves Pix e senhas bancárias', 'high'),
+    MITRETechnique('BR-MALW-001', 'Grandoreiro Banking Trojan', MITRETactic.EXECUTION,
+                   'Trojan bancário brasileiro com overlay de tela falsa sobre apps bancários e acesso ao SISBACEN', 'critical'),
+    MITRETechnique('BR-MALW-002', 'Guildma/Astaroth RAT', MITRETactic.EXECUTION,
+                   'RAT brasileiro usando LOLBins (BITSAdmin, Certutil) para evasão de AV e acesso a home banking', 'critical'),
+    MITRETechnique('BR-MALW-003', 'Javali Banking Trojan', MITRETactic.COLLECTION,
+                   'Trojan focado em credenciais de bancos brasileiros: BB, Bradesco, Itaú, Santander, CEF', 'critical'),
+    MITRETechnique('BR-PHISH-001', 'Brazilian Banking Phishing', MITRETactic.INITIAL_ACCESS,
+                   'Phishing direcionado a clientes de bancos BR com páginas clonadas de BB, CEF, Nubank, Itaú', 'high'),
+    MITRETechnique('BR-SISBACEN-001', 'SISBACEN Unauthorized Access', MITRETactic.CREDENTIAL_ACCESS,
+                   'Acesso não autorizado ao SISBACEN via credential stuffing ou insider threat em instituições financeiras', 'critical'),
+    MITRETechnique('BR-PIX-004', 'Pix Mule Account Network', MITRETactic.EXFILTRATION,
+                   'Uso de contas laranja para lavagem e fragmentação de transferências Pix ilegais', 'high'),
+    MITRETechnique('BR-SOCIAL-001', 'WhatsApp Account Cloning Scam', MITRETactic.INITIAL_ACCESS,
+                   'Clonagem de conta WhatsApp para golpe financeiro impersonando contatos da vítima (Golpe do Zap)', 'high'),
 ]
 
 # Índice por technique_id para busca rápida
@@ -612,6 +634,10 @@ def export_bas_config() -> dict:
         'automated_scoring': True,
         'detection_coverage_tracking': True,
     }
+
+
+BR_TECHNIQUE_IDS = {t.technique_id for t in ALL_TECHNIQUES if t.technique_id.startswith('BR-')}
+BR_TECHNIQUES = [t for t in ALL_TECHNIQUES if t.technique_id.startswith('BR-')]
 
 
 if __name__ == '__main__':

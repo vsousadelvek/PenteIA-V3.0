@@ -4,7 +4,9 @@ import {
   Zap, BarChart3, Radar, Layers, Radio, Target, Shield,
   CheckSquare, FileText, LogOut, Crown, FlaskConical, Monitor,
   ChevronLeft, ChevronRight, X, Crosshair, Bell, Database, Grid,
-  Globe, Package,
+  Globe, Package, Mail, ShieldCheck, Wrench, Link2, DollarSign, Fingerprint, Brain,
+  Key, Building2, BookOpen, Swords, Calendar, Flag, Terminal, Users,
+  Server, Briefcase,
 } from 'lucide-react'
 import { useEnv, saveEnv } from '../hooks/useEnv'
 import api from '../api'
@@ -23,16 +25,22 @@ const GROUPS = [
     items: [
       { path: '/recon', label: 'Recon', Icon: Radar },
       { path: '/cloud', label: 'Cloud Recon', Icon: Globe },
+      { path: '/cloud-identity', label: 'Cloud Identity', Icon: Fingerprint },
     ],
   },
   {
     label: 'Ataque',
     items: [
       { path: '/bas', label: 'BAS / MITRE', Icon: Target },
+      { path: '/real-execution', label: 'Real Execution', Icon: Terminal },
       { path: '/attck-matrix', label: 'ATT&CK Matrix', Icon: Grid },
       { path: '/vulndb', label: 'VulnDB', Icon: Database },
       { path: '/ddos', label: 'DDoS', Icon: Zap },
       { path: '/campaign', label: 'Campanha', Icon: FlaskConical },
+      { path: '/apt', label: 'APT Emulation', Icon: Crosshair },
+      { path: '/ad-attacks', label: 'AD Attacks', Icon: Server },
+      { path: '/playbook-builder', label: 'Playbook Builder', Icon: Layers },
+      { path: '/br-fiscal', label: 'BAS Brasil 🇧🇷', Icon: Package },
     ],
   },
   {
@@ -43,15 +51,59 @@ const GROUPS = [
     ],
   },
   {
+    label: 'Human & SOC',
+    items: [
+      { path: '/phishing', label: 'Phishing Sim.', Icon: Mail },
+      { path: '/soc-validation', label: 'SOC Validation', Icon: ShieldCheck },
+      { path: '/purple-team', label: 'Purple Team', Icon: Swords },
+      { path: '/remediation', label: 'Remediation', Icon: Wrench },
+    ],
+  },
+  {
     label: 'Evasão & Payloads',
     items: [
       { path: '/evasion', label: 'Evasão', Icon: Shield },
     ],
   },
   {
+    label: 'IA & ML',
+    items: [
+      { path: '/ai', label: 'IA / ML', Icon: Brain },
+      { path: '/ai-scenarios', label: 'AI Scenarios', Icon: Zap },
+    ],
+  },
+  {
     label: 'Resultados',
     items: [
       { path: '/reporting', label: 'Relatórios', Icon: FileText },
+      { path: '/integrations', label: 'Integrações', Icon: Link2 },
+      { path: '/api-keys', label: 'API Keys', Icon: Key },
+    ],
+  },
+  {
+    label: 'Purple Team',
+    items: [
+      { path: '/purple-team', label: 'Purple Team', Icon: Shield },
+    ],
+  },
+  {
+    label: 'Automação',
+    items: [
+      { path: '/scheduled-bas', label: 'BAS Agendado', Icon: Calendar },
+    ],
+  },
+  {
+    label: 'Conformidade',
+    items: [
+      { path: '/compliance', label: 'Compliance BR', Icon: Shield },
+      { path: '/br-fiscal', label: 'BR Exclusivo 🇧🇷', Icon: Flag },
+    ],
+  },
+  {
+    label: 'Admin MSSP',
+    items: [
+      { path: '/tenants', label: 'Organização', Icon: Building2 },
+      { path: '/mssp', label: 'Portal MSSP', Icon: Briefcase },
     ],
   },
 ]
@@ -104,7 +156,7 @@ export default function Sidebar({ systemStatus, onLogout, isAdmin, onCollapse })
 
   const allAdminItems = isAdmin ? [{ path: '/admin', label: 'Admin', Icon: Crown }] : []
 
-  const isActive = (path) => path === '/' ? location.pathname === '/' || location.pathname === '/dashboard' : location.pathname.startsWith(path)
+  const isActive = (path) => path === '/' ? location.pathname === '/' || location.pathname === '/dashboard' : location.pathname === path || location.pathname.startsWith(path + '/')
 
   const W = collapsed ? 56 : 220
 

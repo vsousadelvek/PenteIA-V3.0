@@ -1,6 +1,6 @@
 import os
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Callable, Optional
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from fastapi import Depends, HTTPException, status
@@ -27,6 +27,7 @@ class TokenResponse(BaseModel):
     token_type: str
     username: str
     is_admin: bool = False
+    role: str = "user"
 
 class RegisterRequest(BaseModel):
     username: str = Field(..., min_length=3, max_length=50)
@@ -88,3 +89,18 @@ async def authenticate_user(db: Session, username: str, password: str):
     if user.status == "suspended":
         return "suspended"
     return user
+
+def require_role(required_role: str) -> Callable:
+    allowed = {
+        "readonly": ["admin", "redteam", "soc", "ciso", "readonly"],
+        "ciso":     ["admin", "redteam", "soc", "ciso"],
+        "soc":      ["admin", "redteam", "soc"],
+        "redteam":  ["admin", "redteam"],
+        "admin":    ["admin"],
+    }
+    async def _check(current_user: User = Depends(get_current_user)):
+        user_role = getattr(current_user, "role", "user") or "user"
+        if user_role == "admin" or user_role in allowed.get(required_role, []):
+            return current_user
+        raise HTTPException(status_code=403, detail=f"Perfil '{user_role}' sem acesso a este recurso")
+    return _check

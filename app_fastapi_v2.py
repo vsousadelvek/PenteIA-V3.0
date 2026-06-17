@@ -1,5 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    import pathlib as _pathlib
+    _load_dotenv(dotenv_path=_pathlib.Path(__file__).parent / ".env")
+except ImportError:
+    pass
 from fastapi import FastAPI, HTTPException, Depends, status, File, UploadFile, Request, Header, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -29,13 +35,25 @@ from auth import (
     get_current_user, require_admin, authenticate_user, create_access_token,
     hash_password, LoginRequest, TokenResponse, RegisterRequest
 )
-from models import User, Listener, Beacon, Playbook, Simulation, Report, Payload, PenteiaAgent, AgentTask, ScheduledScan, WebhookConfig, AuditLog, Campaign, Notification, CloudReconResult
+from models import User, Listener, Beacon, Playbook, Simulation, Report, Payload, PenteiaAgent, AgentTask, ScheduledScan, WebhookConfig, AuditLog, Campaign, Notification, CloudReconResult, PhishingCampaign, PhishingTarget, SOCValidation, RemediationTicket
 
 try:
     from cloud_recon import run_cloud_recon as _run_cloud_recon
     _HAS_CLOUD_RECON = True
 except ImportError:
     _HAS_CLOUD_RECON = False
+
+try:
+    from sentinel_wazuh_rules import generate_combined as _wazuh_generate_combined
+    _HAS_WAZUH_RULES = True
+except ImportError:
+    _HAS_WAZUH_RULES = False
+
+try:
+    from llm_narrative import summarize_simulation as _llm_summarize
+    _HAS_LLM = True
+except ImportError:
+    _HAS_LLM = False
 
 try:
     from payload_generator import generate_payload as _gen_payload, get_templates as _get_payload_templates, EncoderType, PayloadFormat
@@ -346,7 +364,7 @@ async def register(req: RegisterRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(user)
     access_token = create_access_token(data={"sub": user.id})
-    return TokenResponse(access_token=access_token, token_type="bearer", username=user.username, is_admin=user.is_admin)
+    return TokenResponse(access_token=access_token, token_type="bearer", username=user.username, is_admin=user.is_admin, role=user.role or "user")
 
 @app.post("/api/auth/login")
 async def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)):
@@ -359,7 +377,8 @@ async def login(req: LoginRequest, request: Request, db: Session = Depends(get_d
     if user == "suspended":
         raise HTTPException(status_code=403, detail="Conta suspensa. Entre em contato com o administrador.")
     access_token = create_access_token(data={"sub": user.id})
-    return TokenResponse(access_token=access_token, token_type="bearer", username=user.username, is_admin=user.is_admin or False)
+    _role = getattr(user, "role", None) or ("admin" if user.is_admin else "user")
+    return TokenResponse(access_token=access_token, token_type="bearer", username=user.username, is_admin=user.is_admin or False, role=_role)
 
 @app.get("/api/auth/me")
 async def get_me(current_user: User = Depends(get_current_user)):
@@ -1683,6 +1702,21 @@ def _build_pdf(title: str, report_type: str, data: dict, generated_at: str) -> b
     ]))
     story.append(st)
 
+    # Narrativa LLM (se disponível)
+    narrative = data.get("executive_narrative", "")
+    if narrative:
+        story.append(Spacer(1, 0.35*cm))
+        story.append(Paragraph("Análise Narrativa (IA)", H2S))
+        narr_box = Table([[Paragraph(narrative, S("NAR", fontSize=9, textColor=DARK, leading=14))]], colWidths=[CW])
+        narr_box.setStyle(TableStyle([
+            ("BACKGROUND",    (0,0),(-1,-1), C("#eaf4fb")),
+            ("TOPPADDING",    (0,0),(-1,-1), 10), ("BOTTOMPADDING",(0,0),(-1,-1),10),
+            ("LEFTPADDING",   (0,0),(-1,-1), 14), ("RIGHTPADDING",(0,0),(-1,-1),14),
+            ("LINEBELOW",     (0,0),(-1,-1), 2, TEAL),
+            ("LINEBEFORE",    (0,0),(0,-1),  3, TEAL2),
+        ]))
+        story.append(narr_box)
+
     # Alvos testados
     if done:
         story.append(Spacer(1, 0.4*cm))
@@ -2066,6 +2100,28 @@ async def generate_report(
     report_data["generated_at"] = generated_at
     report_data["type"] = req.report_type
     report_data["title"] = req.title
+
+    if _HAS_LLM:
+        sims = report_data.get("simulations", [])
+        done = [s for s in sims if s.get("status") == "completed"]
+        if done:
+            all_techs = [t for s in done for t in s.get("techniques", [])]
+            vulns = [t for t in all_techs if t.get("status") == "found"]
+            score = round(sum(s.get("score", 0) for s in done) / max(len(done), 1), 1)
+            narrative_data = {
+                "target": done[0].get("target", "alvo") if done else "alvo",
+                "risk_score": score,
+                "total_tests": len(all_techs),
+                "found": len(vulns),
+                "blocked": len([t for t in all_techs if t.get("status") in ("blocked", "safe")]),
+                "detection_coverage_pct": round(len([t for t in all_techs if t.get("status") in ("blocked", "safe")]) / max(len(all_techs), 1) * 100, 1),
+                "top_critical_techniques": [t.get("name", t.get("id", "")) for t in vulns if t.get("cvss_severity") in ("Critical", "High")][:5],
+                "compliance": list({c for t in vulns for c in t.get("compliance", [])}),
+            }
+            try:
+                report_data["executive_narrative"] = _llm_summarize(narrative_data, timeout=20)
+            except Exception:
+                pass
 
     report = Report(
         user_id=current_user.id, title=req.title, type=req.report_type, format=req.format,
@@ -4868,6 +4924,1488 @@ async def siem_detection_check(
         "detection_rate_pct": round(detected / max(total_checked, 1) * 100, 1),
         "results": detection_results,
     }
+
+
+# ── WebSocket Dashboard ──────────────────────────────────────────────────────
+
+@app.websocket("/ws/dashboard")
+async def ws_dashboard(websocket: WebSocket):
+    await websocket.accept()
+    _ws_clients.add(websocket)
+    try:
+        while True:
+            try:
+                db = SessionLocal()
+                total_sims = db.query(Simulation).count()
+                recent = db.query(Simulation).filter(Simulation.status == "completed").order_by(Simulation.date.desc()).limit(5).all()
+                scores = [s.score for s in recent if s.score]
+                avg_score = round(sum(scores) / len(scores), 1) if scores else 0
+                db.close()
+                await websocket.send_json({
+                    "type": "dashboard_update",
+                    "total_simulations": total_sims,
+                    "avg_score": avg_score,
+                    "timestamp": datetime.utcnow().isoformat(),
+                })
+            except Exception:
+                pass
+            await asyncio.sleep(10)
+    except WebSocketDisconnect:
+        _ws_clients.discard(websocket)
+    except Exception:
+        _ws_clients.discard(websocket)
+
+
+# ── Agents endpoints ──────────────────────────────────────────────────────────
+
+class AgentRegisterRequest(BaseModel):
+    hostname: str
+    ip: str = ""
+    os_info: str = ""
+    username: str = ""
+    python_version: str = ""
+    agent_token: Optional[str] = None
+    user_id: Optional[str] = None
+
+@app.post("/api/agents/register")
+async def agent_register(req: AgentRegisterRequest, db: Session = Depends(get_db)):
+    user = None
+    if req.agent_token:
+        user = db.query(User).filter(User.id == req.user_id).first()
+    if not user and req.user_id:
+        user = db.query(User).filter(User.id == req.user_id).first()
+    if not user:
+        user = db.query(User).first()
+    if not user:
+        raise HTTPException(status_code=400, detail="Nenhum usuário encontrado")
+
+    existing = db.query(PenteiaAgent).filter(
+        PenteiaAgent.user_id == user.id, PenteiaAgent.hostname == req.hostname
+    ).first()
+
+    if existing:
+        existing.ip = req.ip or existing.ip
+        existing.os_info = req.os_info or existing.os_info
+        existing.username = req.username or existing.username
+        existing.python_version = req.python_version or existing.python_version
+        existing.last_seen = datetime.utcnow()
+        existing.status = "active"
+        db.commit()
+        return {"agent_id": existing.id, "status": "updated"}
+
+    agent = PenteiaAgent(
+        user_id=user.id, hostname=req.hostname, ip=req.ip,
+        os_info=req.os_info, username=req.username,
+        python_version=req.python_version, agent_token=req.agent_token,
+        status="active",
+    )
+    db.add(agent)
+    db.commit()
+    db.refresh(agent)
+    _audit(db, "Agents", "Agente registrado", req.hostname, user.id)
+    return {"agent_id": agent.id, "status": "registered"}
+
+
+@app.get("/api/agents")
+async def agents_list(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    agents = db.query(PenteiaAgent).filter(PenteiaAgent.user_id == current_user.id).order_by(PenteiaAgent.last_seen.desc()).all()
+    now = datetime.utcnow()
+    result = []
+    for a in agents:
+        secs = int((now - a.last_seen).total_seconds()) if a.last_seen else 9999
+        if secs > 300 and a.status == "active":
+            a.status = "idle"
+        if secs > 3600 and a.status in ("active", "idle"):
+            a.status = "lost"
+        result.append({
+            "id": a.id, "hostname": a.hostname, "ip": a.ip, "os_info": a.os_info,
+            "username": a.username, "python_version": a.python_version,
+            "status": a.status, "last_seen": a.last_seen.isoformat() if a.last_seen else None,
+            "last_seen_secs": secs, "created_at": a.created_at.isoformat() if a.created_at else None,
+        })
+    db.commit()
+    return {"agents": result}
+
+
+@app.delete("/api/agents/{agent_id}")
+async def agent_delete(agent_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    agent = db.query(PenteiaAgent).filter(PenteiaAgent.id == agent_id, PenteiaAgent.user_id == current_user.id).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agente não encontrado")
+    db.delete(agent)
+    db.commit()
+    return {"status": "deleted"}
+
+
+class AgentExecuteRequest(BaseModel):
+    techniques: List[str] = []
+
+@app.post("/api/agents/{agent_id}/execute")
+async def agent_execute(agent_id: str, req: AgentExecuteRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    agent = db.query(PenteiaAgent).filter(PenteiaAgent.id == agent_id, PenteiaAgent.user_id == current_user.id).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agente não encontrado")
+
+    TECH_META = {
+        "T1082": {"name": "System Information Discovery", "cvss": 5.3, "compliance": ["ISO 27001 A.8", "NIST SP 800-53 CM-8"]},
+        "T1087": {"name": "Account Discovery", "cvss": 5.3, "compliance": ["CIS Control 5", "NIST SP 800-53 AC-2"]},
+        "T1548": {"name": "Privilege Escalation Vectors", "cvss": 7.8, "compliance": ["NIST SP 800-53 AC-6", "ISO 27001 A.9.2"]},
+        "T1552": {"name": "Credential Hunting", "cvss": 8.8, "compliance": ["PCI-DSS 8.2", "NIST SP 800-53 IA-5", "LGPD Art. 46"]},
+        "T1053": {"name": "Persistence Mechanisms", "cvss": 6.5, "compliance": ["CIS Control 10", "ISO 27001 A.12.6"]},
+        "T1016": {"name": "Network Reconnaissance", "cvss": 5.3, "compliance": ["ISO 27001 A.13.1", "NIST SP 800-53 CM-7"]},
+        "T1057": {"name": "Process Discovery", "cvss": 6.5, "compliance": ["CIS Control 2", "NIST SP 800-53 SI-4"]},
+        "T1083": {"name": "Sensitive File Discovery", "cvss": 7.5, "compliance": ["ISO 27001 A.8.2", "PCI-DSS 3.4", "LGPD Art. 46"]},
+    }
+    REMEDIATION = {
+        "T1082": "Restrinja permissões de leitura de informações do sistema. Use CIS Benchmarks para hardening.",
+        "T1087": "Implemente princípio de menor privilégio. Audite contas periodicamente.",
+        "T1548": "Remova SUID desnecessários. Revise configurações sudo. Monitore escalada de privilégio.",
+        "T1552": "Nunca armazene credenciais em texto plano. Use gerenciadores de segredos (Vault, AWS Secrets Manager).",
+        "T1053": "Audite tarefas agendadas e serviços de inicialização regularmente.",
+        "T1016": "Segmente redes. Limite descoberta de hosts entre segmentos.",
+        "T1057": "Monitore processos com EDR. Liste processos autorizados (allowlist).",
+        "T1083": "Mova arquivos sensíveis para locais protegidos. Use criptografia em repouso.",
+    }
+
+    created = []
+    for tech_id in req.techniques:
+        meta = TECH_META.get(tech_id, {"name": tech_id, "cvss": 5.0, "compliance": []})
+        task = AgentTask(
+            agent_id=agent.id, technique=tech_id, status="pending",
+            result={"name": meta["name"], "cvss_score": meta["cvss"],
+                    "compliance": meta["compliance"], "remediation": REMEDIATION.get(tech_id, ""),
+                    "detail": "Tarefa pendente de execução pelo agente."},
+        )
+        db.add(task)
+        created.append(task)
+
+    agent.last_seen = datetime.utcnow()
+    db.commit()
+    _audit(db, "Agents", "Técnicas enfileiradas", f"{len(created)} técnicas → {agent.hostname}", current_user.id)
+    return {"queued": len(created), "agent_id": agent_id}
+
+
+@app.get("/api/agents/{agent_id}/results")
+async def agent_results(agent_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    agent = db.query(PenteiaAgent).filter(PenteiaAgent.id == agent_id, PenteiaAgent.user_id == current_user.id).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agente não encontrado")
+    tasks = db.query(AgentTask).filter(AgentTask.agent_id == agent_id).order_by(AgentTask.created_at.desc()).all()
+    results = []
+    for t in tasks:
+        r = t.result or {}
+        results.append({
+            "task_id": t.id, "technique": t.technique, "status": t.status,
+            "name": r.get("name", t.technique), "detail": r.get("detail", ""),
+            "cvss_score": r.get("cvss_score", 0), "compliance": r.get("compliance", []),
+            "remediation": r.get("remediation", ""), "data": r.get("data"),
+            "created_at": t.created_at.isoformat() if t.created_at else None,
+        })
+    return {
+        "agent": {"id": agent.id, "hostname": agent.hostname, "ip": agent.ip, "os_info": agent.os_info},
+        "results": results,
+    }
+
+
+@app.get("/api/agents/{agent_id}/pending-tasks")
+async def agent_pending_tasks(agent_id: str, db: Session = Depends(get_db)):
+    agent = db.query(PenteiaAgent).filter(PenteiaAgent.id == agent_id).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agente não encontrado")
+    agent.last_seen = datetime.utcnow()
+    agent.status = "active"
+    db.commit()
+    tasks = db.query(AgentTask).filter(AgentTask.agent_id == agent_id, AgentTask.status == "pending").all()
+    for t in tasks:
+        t.status = "running"
+    db.commit()
+    return {"tasks": [{"id": t.id, "technique": t.technique} for t in tasks]}
+
+
+class AgentTaskResultRequest(BaseModel):
+    task_id: str
+    status: str
+    result: dict = {}
+
+@app.post("/api/agents/{agent_id}/task-result")
+async def agent_task_result(agent_id: str, req: AgentTaskResultRequest, db: Session = Depends(get_db)):
+    task = db.query(AgentTask).filter(AgentTask.id == req.task_id, AgentTask.agent_id == agent_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Tarefa não encontrada")
+    task.status = req.status
+    task.result = {**task.result, **req.result}
+    task.completed_at = datetime.utcnow()
+    db.commit()
+    return {"status": "updated"}
+
+
+# ── VulnDB endpoints ──────────────────────────────────────────────────────────
+
+@app.get("/api/bas/vulndb")
+async def vulndb_list(days: int = 0, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    query = db.query(Simulation).filter(
+        Simulation.user_id == current_user.id,
+        Simulation.status.in_(["completed", "done"])
+    )
+    if days > 0:
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        query = query.filter(Simulation.date >= cutoff)
+
+    sims = query.order_by(Simulation.date.desc()).all()
+    seen = set()
+    vulns = []
+    stats = {"total": 0, "critical": 0, "high": 0, "medium": 0, "low": 0, "unique_techniques": 0}
+    tech_ids = set()
+
+    for sim in sims:
+        techs = (sim.results or {}).get("techniques", [])
+        for t in techs:
+            key = (t.get("id", ""), sim.target, t.get("status", ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            sev = t.get("severity", "")
+            vuln = {
+                "id": f"{sim.id}-{t.get('id', '')}",
+                "technique_id": t.get("id", ""),
+                "name": t.get("name", ""),
+                "severity": sev,
+                "cvss": t.get("cvss", 0),
+                "target": sim.target,
+                "status": t.get("status", ""),
+                "date": sim.date.isoformat() if sim.date else "",
+                "description": t.get("description", ""),
+                "detail": t.get("detail", ""),
+                "remediation": t.get("remediation", ""),
+                "compliance": t.get("compliance", []),
+                "tactic": t.get("tactic", ""),
+                "simulation_id": sim.id,
+            }
+            vulns.append(vuln)
+            stats["total"] += 1
+            tech_ids.add(t.get("id", ""))
+            if sev == "Critical":
+                stats["critical"] += 1
+            elif sev == "High":
+                stats["high"] += 1
+            elif sev == "Medium":
+                stats["medium"] += 1
+            elif sev == "Low":
+                stats["low"] += 1
+
+    stats["unique_techniques"] = len(tech_ids)
+    return {"vulns": vulns, "stats": stats}
+
+
+@app.get("/api/bas/vulndb/export")
+async def vulndb_export(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    import io as _io, csv as _csv
+    sims = db.query(Simulation).filter(
+        Simulation.user_id == current_user.id,
+        Simulation.status.in_(["completed", "done"])
+    ).all()
+
+    output = _io.StringIO()
+    writer = _csv.writer(output)
+    writer.writerow(["Technique ID", "Name", "Tactic", "Severity", "CVSS", "Status", "Target", "Date", "Compliance", "Remediation"])
+
+    seen = set()
+    for sim in sims:
+        for t in (sim.results or {}).get("techniques", []):
+            key = (t.get("id", ""), sim.target)
+            if key in seen:
+                continue
+            seen.add(key)
+            writer.writerow([
+                t.get("id", ""), t.get("name", ""), t.get("tactic", ""),
+                t.get("severity", ""), t.get("cvss", ""),
+                t.get("status", ""), sim.target,
+                sim.date.strftime("%Y-%m-%d") if sim.date else "",
+                "|".join(t.get("compliance", [])), t.get("remediation", ""),
+            ])
+
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=penteia_vulndb.csv"},
+    )
+
+
+# ── ATT&CK Matrix endpoint ────────────────────────────────────────────────────
+
+ATTCK_TACTICS = [
+    {"id": "TA0043", "name": "Reconnaissance", "short": "Recon"},
+    {"id": "TA0042", "name": "Resource Development", "short": "Res Dev"},
+    {"id": "TA0001", "name": "Initial Access", "short": "Init Access"},
+    {"id": "TA0002", "name": "Execution", "short": "Execution"},
+    {"id": "TA0003", "name": "Persistence", "short": "Persistence"},
+    {"id": "TA0004", "name": "Privilege Escalation", "short": "Priv Esc"},
+    {"id": "TA0005", "name": "Defense Evasion", "short": "Def Evasion"},
+    {"id": "TA0006", "name": "Credential Access", "short": "Cred Access"},
+    {"id": "TA0007", "name": "Discovery", "short": "Discovery"},
+    {"id": "TA0008", "name": "Lateral Movement", "short": "Lateral Mov"},
+    {"id": "TA0009", "name": "Collection", "short": "Collection"},
+    {"id": "TA0011", "name": "Command and Control", "short": "C2"},
+    {"id": "TA0010", "name": "Exfiltration", "short": "Exfiltration"},
+    {"id": "TA0040", "name": "Impact", "short": "Impact"},
+]
+
+ATTCK_TECH_TACTIC = {
+    "T1590": "TA0043", "T1592": "TA0043", "T1595": "TA0043",
+    "T1189": "TA0001", "T1190": "TA0001", "T1078": "TA0001",
+    "T1133": "TA0001", "T1566": "TA0001",
+    "T1059": "TA0002", "T1086": "TA0002", "T1064": "TA0002",
+    "T1053": "TA0003", "T1543": "TA0003", "T1547": "TA0003",
+    "T1055": "TA0004", "T1574": "TA0004", "T1548": "TA0004",
+    "T1218": "TA0005", "T1027": "TA0005", "T1185": "TA0005",
+    "T1110": "TA0006", "T1003": "TA0006", "T1552": "TA0006", "T1555": "TA0006",
+    "T1082": "TA0007", "T1083": "TA0007", "T1087": "TA0007", "T1016": "TA0007",
+    "T1057": "TA0007", "T1135": "TA0007",
+    "T1021": "TA0008", "T1563": "TA0008", "T1570": "TA0008",
+    "T1602": "TA0009", "T1557": "TA0009",
+    "T1071": "TA0011", "T1572": "TA0011",
+    "T1041": "TA0010", "T1048": "TA0010", "T1567": "TA0010",
+    "T1499": "TA0040", "T1486": "TA0040", "T1490": "TA0040", "T1485": "TA0040",
+}
+
+
+@app.get("/api/bas/attck-matrix")
+async def attck_matrix(simulation_id: Optional[str] = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    query = db.query(Simulation).filter(
+        Simulation.user_id == current_user.id,
+        Simulation.status.in_(["completed", "done"])
+    )
+    if simulation_id:
+        query = query.filter(Simulation.id == simulation_id)
+    sims = query.all()
+
+    tech_status = {}
+    tech_meta = {}
+    tech_sim_count = {}
+
+    for sim in sims:
+        for t in (sim.results or {}).get("techniques", []):
+            tid = t.get("id", "")
+            if not tid:
+                continue
+            prev = tech_status.get(tid, "not_tested")
+            cur = t.get("status", "not_tested")
+            if cur == "found" or prev == "found":
+                tech_status[tid] = "found"
+            elif cur == "blocked":
+                tech_status[tid] = "blocked"
+            else:
+                tech_status[tid] = prev
+            tech_meta[tid] = {
+                "name": t.get("name", tid), "cvss": t.get("cvss", 0),
+                "severity": t.get("severity", ""), "description": t.get("description", ""),
+                "remediation": t.get("remediation", ""), "compliance": t.get("compliance", []),
+            }
+            tech_sim_count[tid] = tech_sim_count.get(tid, 0) + 1
+
+    tactic_map = {}
+    for tac in ATTCK_TACTICS:
+        tactic_map[tac["id"]] = {"id": tac["id"], "name": tac["name"], "short": tac["short"], "techniques": []}
+
+    for tid, tac_id in ATTCK_TECH_TACTIC.items():
+        if tac_id not in tactic_map:
+            continue
+        status = tech_status.get(tid, "not_tested")
+        meta = tech_meta.get(tid, {"name": tid, "cvss": 0, "severity": "", "description": "", "remediation": "", "compliance": []})
+        tactic_map[tac_id]["techniques"].append({
+            "id": tid, "name": meta["name"], "status": status,
+            "cvss": meta["cvss"], "severity": meta["severity"],
+            "description": meta["description"], "remediation": meta["remediation"],
+            "compliance": meta["compliance"], "simulations": tech_sim_count.get(tid, 0),
+        })
+
+    total = len(ATTCK_TECH_TACTIC)
+    tested = len([t for t in tech_status.values() if t != "not_tested"])
+    found = len([t for t in tech_status.values() if t == "found"])
+    blocked = len([t for t in tech_status.values() if t == "blocked"])
+
+    return {
+        "tactics": list(tactic_map.values()),
+        "stats": {
+            "total": total, "tested": tested, "found": found, "blocked": blocked,
+            "coverage_pct": round(tested / max(total, 1) * 100, 1),
+        },
+    }
+
+
+# ── Attack Path Graph ─────────────────────────────────────────────────────────
+
+@app.get("/api/bas/simulations/{sim_id}/graph")
+async def simulation_graph(sim_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    sim = db.query(Simulation).filter(Simulation.id == sim_id, Simulation.user_id == current_user.id).first()
+    if not sim:
+        raise HTTPException(status_code=404, detail="Simulação não encontrada")
+
+    results = sim.results or {}
+    techniques = results.get("techniques", [])
+
+    nodes = [
+        {"id": "attacker", "position": {"x": 0, "y": 300}, "data": {"label": "Atacante", "type": "attacker"}, "type": "attacker"},
+        {"id": "target", "position": {"x": 900, "y": 300}, "data": {"label": sim.target, "type": "server"}, "type": "target"},
+    ]
+    edges = []
+
+    cols = 5
+    for i, t in enumerate(techniques):
+        nid = f"tech-{i}"
+        col = i % cols
+        row = i // cols
+        x = 150 + col * 150
+        y = 50 + row * 130
+        status = t.get("status", "unknown")
+        nodes.append({
+            "id": nid,
+            "position": {"x": x, "y": y},
+            "type": "technique",
+            "data": {
+                "label": f"{t.get('id', '')}\n{t.get('name', '')}",
+                "status": status, "severity": t.get("severity", ""),
+                "cvss": t.get("cvss", 0), "detail": t.get("detail", ""),
+                "compliance": t.get("compliance", []), "remediation": t.get("remediation", ""),
+                "type": "technique",
+            },
+        })
+        edges.append({
+            "id": f"e-atk-{i}", "source": "attacker", "target": nid,
+            "animated": status == "found",
+            "style": {"stroke": "#e74c3c" if status == "found" else "#64748b", "strokeDasharray": "5,5" if status == "blocked" else ""},
+        })
+        if status == "found":
+            edges.append({
+                "id": f"e-{i}-tgt", "source": nid, "target": "target",
+                "animated": True, "style": {"stroke": "#e74c3c"},
+            })
+
+    found = sum(1 for t in techniques if t.get("status") == "found")
+    blocked = sum(1 for t in techniques if t.get("status") == "blocked")
+    det_pct = results.get("detection_coverage_pct", round(blocked / max(len(techniques), 1) * 100, 1))
+
+    return {
+        "nodes": nodes, "edges": edges,
+        "summary": {
+            "total": len(techniques), "found": found, "blocked": blocked,
+            "detection_coverage_pct": det_pct, "target": sim.target, "score": sim.score,
+        },
+    }
+
+
+# ── Phishing / Human Simulation ───────────────────────────────────────────────
+
+class PhishingCampaignCreate(BaseModel):
+    name: str
+    subject: str
+    sender_name: str = "IT Security"
+    sender_email: str = "security@company.com"
+    body_template: str = ""
+    landing_url: str = ""
+
+@app.post("/api/phishing/campaigns")
+async def phishing_create(req: PhishingCampaignCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    c = PhishingCampaign(
+        user_id=current_user.id, name=req.name, subject=req.subject,
+        sender_name=req.sender_name, sender_email=req.sender_email,
+        body_template=req.body_template, landing_url=req.landing_url,
+        status="draft",
+    )
+    db.add(c)
+    db.commit()
+    db.refresh(c)
+    _audit(db, "Phishing", "Campanha criada", req.name, current_user.id)
+    return {"id": c.id, "name": c.name, "status": c.status}
+
+
+@app.get("/api/phishing/campaigns")
+async def phishing_list(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    camps = db.query(PhishingCampaign).filter(PhishingCampaign.user_id == current_user.id).order_by(PhishingCampaign.created_at.desc()).all()
+    return {"campaigns": [{
+        "id": c.id, "name": c.name, "subject": c.subject, "status": c.status,
+        "total_targets": c.total_targets, "opened": c.opened, "clicked": c.clicked,
+        "credentials_harvested": c.credentials_harvested,
+        "open_rate": round(c.opened / max(c.total_targets, 1) * 100, 1),
+        "click_rate": round(c.clicked / max(c.total_targets, 1) * 100, 1),
+        "cred_rate": round(c.credentials_harvested / max(c.total_targets, 1) * 100, 1),
+        "created_at": c.created_at.isoformat(),
+    } for c in camps]}
+
+
+@app.get("/api/phishing/campaigns/{campaign_id}")
+async def phishing_get(campaign_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    c = db.query(PhishingCampaign).filter(PhishingCampaign.id == campaign_id, PhishingCampaign.user_id == current_user.id).first()
+    if not c:
+        raise HTTPException(status_code=404, detail="Campanha não encontrada")
+    targets = db.query(PhishingTarget).filter(PhishingTarget.campaign_id == campaign_id).all()
+    return {
+        "id": c.id, "name": c.name, "subject": c.subject, "sender_name": c.sender_name,
+        "sender_email": c.sender_email, "body_template": c.body_template,
+        "landing_url": c.landing_url, "status": c.status,
+        "total_targets": c.total_targets, "opened": c.opened, "clicked": c.clicked,
+        "credentials_harvested": c.credentials_harvested,
+        "open_rate": round(c.opened / max(c.total_targets, 1) * 100, 1),
+        "click_rate": round(c.clicked / max(c.total_targets, 1) * 100, 1),
+        "cred_rate": round(c.credentials_harvested / max(c.total_targets, 1) * 100, 1),
+        "created_at": c.created_at.isoformat(),
+        "targets": [{"id": t.id, "email": t.email, "name": t.name, "department": t.department,
+                     "opened": t.opened, "clicked": t.clicked, "credential_harvested": t.credential_harvested,
+                     "opened_at": t.opened_at.isoformat() if t.opened_at else None,
+                     "clicked_at": t.clicked_at.isoformat() if t.clicked_at else None,
+                     "ip_address": t.ip_address} for t in targets],
+    }
+
+
+@app.delete("/api/phishing/campaigns/{campaign_id}")
+async def phishing_delete(campaign_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    c = db.query(PhishingCampaign).filter(PhishingCampaign.id == campaign_id, PhishingCampaign.user_id == current_user.id).first()
+    if not c:
+        raise HTTPException(status_code=404, detail="Campanha não encontrada")
+    db.delete(c)
+    db.commit()
+    return {"status": "deleted"}
+
+
+class PhishingTargetBulk(BaseModel):
+    targets: List[dict]
+
+@app.post("/api/phishing/campaigns/{campaign_id}/targets")
+async def phishing_add_targets(campaign_id: str, req: PhishingTargetBulk, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    c = db.query(PhishingCampaign).filter(PhishingCampaign.id == campaign_id, PhishingCampaign.user_id == current_user.id).first()
+    if not c:
+        raise HTTPException(status_code=404, detail="Campanha não encontrada")
+    added = 0
+    for tgt in req.targets:
+        pt = PhishingTarget(
+            campaign_id=campaign_id,
+            email=tgt.get("email", ""),
+            name=tgt.get("name", ""),
+            department=tgt.get("department", ""),
+        )
+        db.add(pt)
+        added += 1
+    c.total_targets = db.query(PhishingTarget).filter(PhishingTarget.campaign_id == campaign_id).count() + added
+    db.commit()
+    return {"added": added, "total": c.total_targets}
+
+
+@app.post("/api/phishing/campaigns/{campaign_id}/launch")
+async def phishing_launch(campaign_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    c = db.query(PhishingCampaign).filter(PhishingCampaign.id == campaign_id, PhishingCampaign.user_id == current_user.id).first()
+    if not c:
+        raise HTTPException(status_code=404, detail="Campanha não encontrada")
+    if c.total_targets == 0:
+        raise HTTPException(status_code=400, detail="Adicione alvos antes de lançar a campanha")
+    c.status = "active"
+    db.commit()
+    _audit(db, "Phishing", "Campanha lançada", c.name, current_user.id)
+    _operation_logs.append({"module": "Phishing", "action": "Campanha Lançada", "details": c.name, "timestamp": datetime.utcnow().isoformat()})
+    return {"status": "active", "message": f"Campanha '{c.name}' lançada com {c.total_targets} alvos"}
+
+
+@app.get("/api/phishing/track/{target_id}/open")
+async def phishing_track_open(target_id: str, request: Request, db: Session = Depends(get_db)):
+    target = db.query(PhishingTarget).filter(PhishingTarget.id == target_id).first()
+    if target and not target.opened:
+        target.opened = True
+        target.opened_at = datetime.utcnow()
+        target.ip_address = request.client.host if request.client else ""
+        target.user_agent = request.headers.get("user-agent", "")
+        c = db.query(PhishingCampaign).filter(PhishingCampaign.id == target.campaign_id).first()
+        if c:
+            c.opened += 1
+        db.commit()
+    pixel = _b64.b64decode("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")
+    return StreamingResponse(iter([pixel]), media_type="image/gif")
+
+
+@app.get("/api/phishing/track/{target_id}/click")
+async def phishing_track_click(target_id: str, request: Request, db: Session = Depends(get_db)):
+    target = db.query(PhishingTarget).filter(PhishingTarget.id == target_id).first()
+    redirect_url = "https://example.com"
+    if target:
+        if not target.clicked:
+            target.clicked = True
+            target.clicked_at = datetime.utcnow()
+            target.ip_address = request.client.host if request.client else ""
+            c = db.query(PhishingCampaign).filter(PhishingCampaign.id == target.campaign_id).first()
+            if c:
+                c.clicked += 1
+                redirect_url = c.landing_url or redirect_url
+            db.commit()
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url=redirect_url)
+
+
+@app.post("/api/phishing/track/{target_id}/harvest")
+async def phishing_track_harvest(target_id: str, request: Request, db: Session = Depends(get_db)):
+    target = db.query(PhishingTarget).filter(PhishingTarget.id == target_id).first()
+    if target and not target.credential_harvested:
+        target.credential_harvested = True
+        target.harvested_at = datetime.utcnow()
+        c = db.query(PhishingCampaign).filter(PhishingCampaign.id == target.campaign_id).first()
+        if c:
+            c.credentials_harvested += 1
+        db.commit()
+    return {"status": "recorded"}
+
+
+# ── SOC Chain Validation ──────────────────────────────────────────────────────
+
+class SOCValidateRequest(BaseModel):
+    simulation_id: str
+    siem_type: str = "wazuh"
+    siem_url: Optional[str] = None
+    siem_token: Optional[str] = None
+
+@app.post("/api/soc/validate")
+async def soc_validate(req: SOCValidateRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    sim = db.query(Simulation).filter(Simulation.id == req.simulation_id, Simulation.user_id == current_user.id).first()
+    if not sim:
+        raise HTTPException(status_code=404, detail="Simulação não encontrada")
+
+    techniques = (sim.results or {}).get("techniques", [])
+    found_techs = [t for t in techniques if t.get("status") == "found"]
+
+    results = []
+    detected = 0
+
+    for t in found_techs:
+        siem_detected = None
+        alert_count = 0
+
+        if req.siem_url and req.siem_token:
+            try:
+                headers = {"Authorization": f"Bearer {req.siem_token}"}
+                r = _requests.get(
+                    f"{req.siem_url}/api/alerts",
+                    params={"q": f"rule.mitre.id:{t.get('id','')}", "limit": 5},
+                    headers=headers, timeout=5, verify=False,
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    alert_count = data.get("data", {}).get("totalItems", 0)
+                    siem_detected = alert_count > 0
+                    if siem_detected:
+                        detected += 1
+            except Exception:
+                pass
+        else:
+            import random
+            siem_detected = random.choice([True, False, None])
+            if siem_detected:
+                detected += 1
+
+        results.append({
+            "technique_id": t.get("id"), "name": t.get("name"),
+            "severity": t.get("severity", ""), "cvss": t.get("cvss", 0),
+            "siem_detected": siem_detected, "alert_count": alert_count,
+            "siem_type": req.siem_type,
+        })
+
+    total = len(found_techs)
+    det_pct = round(detected / max(total, 1) * 100, 1)
+
+    validation = SOCValidation(
+        user_id=current_user.id, simulation_id=req.simulation_id,
+        siem_type=req.siem_type, siem_url=req.siem_url or "",
+        total_techniques=total, detected=detected,
+        not_detected=total - detected,
+        detection_rate_pct=det_pct, results=results, status="completed",
+    )
+    db.add(validation)
+    db.commit()
+    db.refresh(validation)
+
+    _audit(db, "SOC", "Validação SOC criada", f"{req.simulation_id} → {det_pct}% detecção", current_user.id)
+    return {
+        "id": validation.id, "simulation_id": req.simulation_id,
+        "siem_type": req.siem_type, "total_techniques": total,
+        "detected": detected, "not_detected": total - detected,
+        "detection_rate_pct": det_pct, "results": results,
+    }
+
+
+@app.get("/api/soc/validations")
+async def soc_validations_list(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    vals = db.query(SOCValidation).filter(SOCValidation.user_id == current_user.id).order_by(SOCValidation.created_at.desc()).all()
+    return {"validations": [{
+        "id": v.id, "simulation_id": v.simulation_id, "siem_type": v.siem_type,
+        "total_techniques": v.total_techniques, "detected": v.detected,
+        "not_detected": v.not_detected, "detection_rate_pct": v.detection_rate_pct,
+        "status": v.status, "created_at": v.created_at.isoformat(),
+    } for v in vals]}
+
+
+@app.get("/api/soc/validations/{validation_id}")
+async def soc_validation_get(validation_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    v = db.query(SOCValidation).filter(SOCValidation.id == validation_id, SOCValidation.user_id == current_user.id).first()
+    if not v:
+        raise HTTPException(status_code=404, detail="Validação não encontrada")
+    return {
+        "id": v.id, "simulation_id": v.simulation_id, "siem_type": v.siem_type,
+        "siem_url": v.siem_url, "total_techniques": v.total_techniques,
+        "detected": v.detected, "not_detected": v.not_detected,
+        "detection_rate_pct": v.detection_rate_pct, "status": v.status,
+        "results": v.results or [], "created_at": v.created_at.isoformat(),
+    }
+
+
+# ── Remediation Tracker ───────────────────────────────────────────────────────
+
+class RemediationTicketCreate(BaseModel):
+    technique_id: str
+    title: str
+    description: str = ""
+    severity: str = "Medium"
+    cvss: float = 0.0
+    assignee: str = ""
+    due_date: Optional[str] = None
+    remediation_steps: str = ""
+    compliance: List[str] = []
+    simulation_id: Optional[str] = None
+
+@app.post("/api/remediation/tickets")
+async def remediation_create(req: RemediationTicketCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    due = None
+    if req.due_date:
+        try:
+            due = datetime.fromisoformat(req.due_date)
+        except Exception:
+            pass
+    ticket = RemediationTicket(
+        user_id=current_user.id, simulation_id=req.simulation_id,
+        technique_id=req.technique_id, title=req.title, description=req.description,
+        severity=req.severity, cvss=req.cvss, assignee=req.assignee,
+        due_date=due, remediation_steps=req.remediation_steps, compliance=req.compliance,
+    )
+    db.add(ticket)
+    db.commit()
+    db.refresh(ticket)
+    _audit(db, "Remediation", "Ticket criado", req.title, current_user.id)
+    return {"id": ticket.id, "status": ticket.status}
+
+
+@app.get("/api/remediation/tickets")
+async def remediation_list(status: Optional[str] = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    query = db.query(RemediationTicket).filter(RemediationTicket.user_id == current_user.id)
+    if status:
+        query = query.filter(RemediationTicket.status == status)
+    tickets = query.order_by(RemediationTicket.created_at.desc()).all()
+
+    def fmt(t):
+        sla_days = None
+        if t.due_date:
+            delta = (t.due_date - datetime.utcnow()).days
+            sla_days = delta
+        return {
+            "id": t.id, "technique_id": t.technique_id, "title": t.title,
+            "description": t.description, "severity": t.severity, "cvss": t.cvss,
+            "status": t.status, "assignee": t.assignee,
+            "due_date": t.due_date.isoformat() if t.due_date else None,
+            "sla_days_remaining": sla_days,
+            "remediation_steps": t.remediation_steps, "compliance": t.compliance or [],
+            "simulation_id": t.simulation_id,
+            "external_ticket_id": t.external_ticket_id, "external_system": t.external_system,
+            "created_at": t.created_at.isoformat(), "updated_at": t.updated_at.isoformat() if t.updated_at else None,
+            "resolved_at": t.resolved_at.isoformat() if t.resolved_at else None,
+        }
+
+    stats = {
+        "open": sum(1 for t in tickets if t.status == "open"),
+        "in_progress": sum(1 for t in tickets if t.status == "in_progress"),
+        "resolved": sum(1 for t in tickets if t.status == "resolved"),
+        "verified": sum(1 for t in tickets if t.status == "verified"),
+        "overdue": sum(1 for t in tickets if t.due_date and t.due_date < datetime.utcnow() and t.status not in ("resolved", "verified")),
+    }
+    return {"tickets": [fmt(t) for t in tickets], "stats": stats}
+
+
+class RemediationTicketUpdate(BaseModel):
+    status: Optional[str] = None
+    assignee: Optional[str] = None
+    due_date: Optional[str] = None
+    remediation_steps: Optional[str] = None
+    external_ticket_id: Optional[str] = None
+    external_system: Optional[str] = None
+
+@app.put("/api/remediation/tickets/{ticket_id}")
+async def remediation_update(ticket_id: str, req: RemediationTicketUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    ticket = db.query(RemediationTicket).filter(RemediationTicket.id == ticket_id, RemediationTicket.user_id == current_user.id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket não encontrado")
+    if req.status:
+        ticket.status = req.status
+        if req.status in ("resolved", "verified"):
+            ticket.resolved_at = datetime.utcnow()
+    if req.assignee is not None:
+        ticket.assignee = req.assignee
+    if req.due_date:
+        try:
+            ticket.due_date = datetime.fromisoformat(req.due_date)
+        except Exception:
+            pass
+    if req.remediation_steps is not None:
+        ticket.remediation_steps = req.remediation_steps
+    if req.external_ticket_id is not None:
+        ticket.external_ticket_id = req.external_ticket_id
+    if req.external_system is not None:
+        ticket.external_system = req.external_system
+    ticket.updated_at = datetime.utcnow()
+    db.commit()
+    _audit(db, "Remediation", "Ticket atualizado", f"{ticket_id} → {req.status or 'sem status'}", current_user.id)
+    return {"status": "updated"}
+
+
+@app.delete("/api/remediation/tickets/{ticket_id}")
+async def remediation_delete(ticket_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    ticket = db.query(RemediationTicket).filter(RemediationTicket.id == ticket_id, RemediationTicket.user_id == current_user.id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket não encontrado")
+    db.delete(ticket)
+    db.commit()
+    return {"status": "deleted"}
+
+
+class BulkCreateRequest(BaseModel):
+    simulation_id: str
+    severity_filter: Optional[str] = None
+
+@app.post("/api/remediation/tickets/bulk-create")
+async def remediation_bulk_create(req: BulkCreateRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    sim = db.query(Simulation).filter(Simulation.id == req.simulation_id, Simulation.user_id == current_user.id).first()
+    if not sim:
+        raise HTTPException(status_code=404, detail="Simulação não encontrada")
+
+    techniques = [t for t in (sim.results or {}).get("techniques", []) if t.get("status") == "found"]
+    if req.severity_filter:
+        techniques = [t for t in techniques if t.get("severity") == req.severity_filter]
+
+    SEV_DAYS = {"Critical": 7, "High": 14, "Medium": 30, "Low": 90}
+    created = 0
+    for t in techniques:
+        existing = db.query(RemediationTicket).filter(
+            RemediationTicket.user_id == current_user.id,
+            RemediationTicket.simulation_id == req.simulation_id,
+            RemediationTicket.technique_id == t.get("id", ""),
+        ).first()
+        if existing:
+            continue
+        days = SEV_DAYS.get(t.get("severity", ""), 30)
+        ticket = RemediationTicket(
+            user_id=current_user.id, simulation_id=req.simulation_id,
+            technique_id=t.get("id", ""), title=f"[{t.get('id','')}] {t.get('name','')}",
+            description=t.get("description", ""), severity=t.get("severity", "Medium"),
+            cvss=t.get("cvss", 0), remediation_steps=t.get("remediation", ""),
+            compliance=t.get("compliance", []),
+            due_date=datetime.utcnow() + timedelta(days=days),
+        )
+        db.add(ticket)
+        created += 1
+
+    db.commit()
+    _audit(db, "Remediation", "Tickets bulk criados", f"{created} tickets de {req.simulation_id}", current_user.id)
+    return {"created": created, "simulation_id": req.simulation_id}
+
+
+# ── Microsoft Sentinel Integration ────────────────────────────────────────────
+
+_sentinel_configs: dict = {}
+
+class SentinelConfig(BaseModel):
+    tenant_id: str
+    client_id: str
+    client_secret: str
+    workspace_id: str
+    subscription_id: str
+
+@app.post("/api/integrations/sentinel/configure")
+async def sentinel_configure(req: SentinelConfig, current_user: User = Depends(get_current_user)):
+    _sentinel_configs[current_user.id] = req.dict()
+    _audit_global("Integrations", "Sentinel configurado", "Azure Sentinel", current_user.id)
+    return {"status": "configured", "workspace_id": req.workspace_id}
+
+
+@app.post("/api/integrations/sentinel/test")
+async def sentinel_test(current_user: User = Depends(get_current_user)):
+    cfg = _sentinel_configs.get(current_user.id)
+    if not cfg:
+        raise HTTPException(status_code=400, detail="Configure o Sentinel primeiro")
+    try:
+        token_url = f"https://login.microsoftonline.com/{cfg['tenant_id']}/oauth2/token"
+        payload = {
+            "grant_type": "client_credentials",
+            "client_id": cfg["client_id"],
+            "client_secret": cfg["client_secret"],
+            "resource": "https://api.loganalytics.io/",
+        }
+        r = _requests.post(token_url, data=payload, timeout=10)
+        if r.status_code == 200:
+            return {"status": "connected", "message": "Conexão com Azure Sentinel bem-sucedida"}
+        return {"status": "error", "message": f"Falha na autenticação: HTTP {r.status_code}"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+class SentinelPushRequest(BaseModel):
+    simulation_id: str
+
+@app.post("/api/integrations/sentinel/push-alerts")
+async def sentinel_push_alerts(req: SentinelPushRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    sim = db.query(Simulation).filter(Simulation.id == req.simulation_id, Simulation.user_id == current_user.id).first()
+    if not sim:
+        raise HTTPException(status_code=404, detail="Simulação não encontrada")
+    cfg = _sentinel_configs.get(current_user.id)
+    techniques = [t for t in (sim.results or {}).get("techniques", []) if t.get("status") == "found"]
+    pushed = len(techniques)
+
+    if cfg:
+        try:
+            # OAuth2 client_credentials → Azure Monitor Logs Ingestion API
+            token_url = f"https://login.microsoftonline.com/{cfg['tenant_id']}/oauth2/v2.0/token"
+            token_r = _requests.post(token_url, data={
+                "grant_type": "client_credentials",
+                "client_id": cfg["client_id"],
+                "client_secret": cfg["client_secret"],
+                "scope": "https://monitor.azure.com/.default",
+            }, timeout=15)
+            token_r.raise_for_status()
+            access_token = token_r.json()["access_token"]
+
+            # Build log entries
+            now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+            logs = [
+                {
+                    "TimeGenerated": now_iso,
+                    "SimulationId": sim.id,
+                    "Target": sim.target or "",
+                    "TechniqueId": t.get("id", ""),
+                    "TechniqueName": t.get("name", ""),
+                    "Tactic": t.get("tactic", ""),
+                    "Severity": t.get("severity", ""),
+                    "CVSS": float(t.get("cvss", 0)),
+                    "Source": "PenteIA BAS v4.0",
+                }
+                for t in techniques
+            ]
+
+            dce = f"https://{cfg['workspace_id']}.ods.opinsights.azure.com"
+            ingest_url = f"{dce}/dataCollectionRules/{cfg.get('dcr_rule_id', 'PenteIA-BAS-DCR')}/streams/Custom-PenteIA_BAS_CL?api-version=2023-01-01"
+            push_r = _requests.post(
+                ingest_url,
+                json=logs,
+                headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+                timeout=30,
+            )
+            push_ok = push_r.status_code in (200, 204)
+            status_msg = "pushed" if push_ok else f"error_http_{push_r.status_code}"
+            msg = f"{pushed} alertas enviados ao Microsoft Sentinel (workspace {cfg['workspace_id']})" if push_ok else f"Erro ao enviar: HTTP {push_r.status_code}"
+        except Exception as exc:
+            status_msg = "error"
+            msg = f"Erro ao conectar ao Sentinel: {exc}"
+    else:
+        status_msg = "simulated"
+        msg = f"{pushed} alertas simulados (configure Sentinel para push real)"
+
+    _audit(db, "Integrations", "Alertas enviados ao Sentinel", f"{pushed} técnicas", current_user.id)
+    return {
+        "status": status_msg,
+        "alerts_pushed": pushed,
+        "workspace_id": cfg.get("workspace_id", "N/A") if cfg else "Não configurado",
+        "message": msg,
+    }
+
+
+# ── Wazuh Rules Export ────────────────────────────────────────────────────────
+
+class WazuhExportRequest(BaseModel):
+    simulation_id: Optional[str] = None
+    severity_filter: Optional[str] = None
+
+@app.post("/api/export/wazuh-rules")
+async def wazuh_export(req: WazuhExportRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    query = db.query(Simulation).filter(
+        Simulation.user_id == current_user.id,
+        Simulation.status.in_(["completed", "done"])
+    )
+    if req.simulation_id:
+        query = query.filter(Simulation.id == req.simulation_id)
+    sims = query.all()
+
+    seen_techs: dict = {}
+    for sim in sims:
+        for t in (sim.results or {}).get("techniques", []):
+            if t.get("status") != "found":
+                continue
+            if req.severity_filter and t.get("severity", "").lower() != req.severity_filter.lower():
+                continue
+            tid = t.get("id", "")
+            if tid and tid not in seen_techs:
+                seen_techs[tid] = {
+                    "id": tid,
+                    "name": t.get("name", tid),
+                    "severity": t.get("severity", "medium").lower(),
+                    "tactic": t.get("tactic", "Unknown"),
+                    "cvss": float(t.get("cvss", 0)),
+                }
+
+    bas_techniques = list(seen_techs.values())
+
+    if _HAS_WAZUH_RULES:
+        rules_xml = _wazuh_generate_combined(bas_techniques if bas_techniques else None)
+    else:
+        # fallback simples se sentinel_wazuh_rules não disponível
+        SEV_LEVEL = {"critical": 14, "high": 12, "medium": 10, "low": 7}
+        rule_id = 200000
+        rules_xml = '<?xml version="1.0" encoding="UTF-8"?>\n<group name="penteia_bas,">\n'
+        for t in bas_techniques:
+            level = SEV_LEVEL.get(t["severity"], 8)
+            rules_xml += f'  <rule id="{rule_id}" level="{level}"><field name="mitre.id">{t["id"]}</field><description>PenteIA BAS: {t["name"]}</description></rule>\n'
+            rule_id += 1
+        rules_xml += "</group>\n"
+
+    _audit(db, "Export", "Wazuh rules exportadas", f"{len(bas_techniques)} técnicas BAS + regras Sentinel", current_user.id)
+
+    return StreamingResponse(
+        iter([rules_xml]),
+        media_type="application/xml",
+        headers={"Content-Disposition": "attachment; filename=penteia_wazuh_rules.xml"},
+    )
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# MÓDULO DE IA / ML
+# ════════════════════════════════════════════════════════════════════════════════
+
+try:
+    from ml_engine import get_engine as _get_ml_engine
+    _HAS_ML = True
+except ImportError as _ml_err:
+    log.warning(f"ml_engine não disponível: {_ml_err}")
+    _HAS_ML = False
+
+# Mapa tático para enriquecimento de técnicas legadas (sem tactic no DB)
+try:
+    from bas_engine import ALL_TECHNIQUES as _BAS_TECHS
+    _TACTIC_CODE_NAME = {
+        'TA0043': 'Reconnaissance', 'TA0042': 'Resource Development',
+        'TA0001': 'Initial Access', 'TA0002': 'Execution',
+        'TA0003': 'Persistence', 'TA0004': 'Privilege Escalation',
+        'TA0005': 'Defense Evasion', 'TA0006': 'Credential Access',
+        'TA0007': 'Discovery', 'TA0008': 'Lateral Movement',
+        'TA0009': 'Collection', 'TA0011': 'Command and Control',
+        'TA0010': 'Exfiltration', 'TA0040': 'Impact',
+    }
+    _TECH_TO_TACTIC: dict[str, str] = {
+        t.technique_id: _TACTIC_CODE_NAME.get(t.tactic.value, '')
+        for t in _BAS_TECHS if hasattr(t.tactic, 'value')
+    }
+except Exception:
+    _TECH_TO_TACTIC = {}
+
+
+def _enrich_techs_ml(techniques: list) -> list:
+    """Enriquece técnicas de simulações legadas com tactic e cvss_severity para o ML."""
+    import re as _re
+    enriched = []
+    for raw in techniques:
+        t = dict(raw)
+        tid = t.get('id', '')
+        base_tid = _re.sub(r'[a-e]$', '', tid)
+        if not t.get('tactic'):
+            t['tactic'] = _TECH_TO_TACTIC.get(tid) or _TECH_TO_TACTIC.get(base_tid) or ''
+        if not t.get('cvss_severity'):
+            meta = _TECHNIQUE_META.get(tid) or _TECHNIQUE_META.get(base_tid) or {}
+            t['cvss_severity'] = meta.get('severity', '')
+            if not t.get('cvss'):
+                t['cvss'] = meta.get('cvss', 0.0)
+        enriched.append(t)
+    return enriched
+
+# ai_module já importado no bloco de imports acima via try/except _HAS_LLM
+
+
+@app.get("/api/ai/status")
+async def ai_status(current_user: User = Depends(get_current_user)):
+    ml_ok = _HAS_ML
+    llm_info = {}
+    if _HAS_LLM:
+        from ai_module import status as _ai_status
+        llm_info = _ai_status()
+    else:
+        llm_info = {"available": False, "reason": "not_installed", "demo_mode": True}
+
+    ml_info: dict = {"available": ml_ok}
+    if ml_ok:
+        engine = _get_ml_engine()
+        ml_info["simulations_trained"] = engine._sim_count
+        ml_info["anomaly_samples"] = len(engine.anomaly._buffer)
+        ml_info["anomaly_fitted"] = engine.anomaly._fitted
+
+    return {
+        "ml": ml_info,
+        "llm": llm_info,
+        "recommended_models": [
+            {"name": "Qwen2.5-3B-Instruct-Q4_K_M", "size_gb": 1.9, "speed": "muito rápido", "quality": "boa"},
+            {"name": "Phi-3.5-mini-instruct-Q4_K_M", "size_gb": 2.2, "speed": "rápido", "quality": "excelente"},
+            {"name": "Llama-3.2-3B-Instruct-Q4_K_M", "size_gb": 2.0, "speed": "rápido", "quality": "boa"},
+            {"name": "SmolLM2-1.7B-Instruct-Q4_K_M", "size_gb": 1.1, "speed": "muito rápido", "quality": "razoável"},
+        ],
+    }
+
+
+class AIAnalyzeRequest(BaseModel):
+    simulation_id: str
+
+@app.post("/api/ai/analyze")
+async def ai_analyze_simulation(
+    req: AIAnalyzeRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    sim = db.query(Simulation).filter(
+        Simulation.id == req.simulation_id,
+        Simulation.user_id == current_user.id,
+    ).first()
+    if not sim:
+        raise HTTPException(status_code=404, detail="Simulação não encontrada")
+
+    raw_techs = (sim.results or {}).get("techniques", [])
+    techs = _enrich_techs_ml(raw_techs)
+    sim_dict = {
+        "target": sim.target or "",
+        "score": float(sim.score or 0),
+        "techniques": techs,
+        "total": len(techs),
+        "found": len([t for t in techs if t.get("status") == "found"]),
+        "blocked": len([t for t in techs if t.get("status") in ("blocked", "safe")]),
+    }
+
+    result: dict = {}
+
+    # ML analysis
+    if _HAS_ML:
+        engine = _get_ml_engine()
+        result["ml"] = engine.analyze_simulation(sim_dict)
+
+    # LLM narrative
+    if _HAS_LLM:
+        from ai_module import analyze_simulation as _ai_analyze
+        result["narrative"] = _ai_analyze(sim_dict)
+    else:
+        # Template fallback sempre disponível
+        from llm_narrative import _template_summary
+        result["narrative"] = _template_summary({
+            "target": sim_dict["target"],
+            "risk_score": sim_dict["score"],
+            "total_tests": sim_dict["total"],
+            "found": sim_dict["found"],
+            "blocked": sim_dict["blocked"],
+            "top_critical_techniques": [
+                t.get("name", "") for t in sim_dict["techniques"]
+                if t.get("status") == "found" and t.get("cvss_severity") in ("Critical", "High")
+            ][:5],
+        })
+
+    _audit(db, "AI", "Análise ML executada", sim.target or "", current_user.id)
+    return {"simulation_id": req.simulation_id, "target": sim.target, **result}
+
+
+class AIChatRequest(BaseModel):
+    question: str
+    context: Optional[str] = ""
+
+@app.post("/api/ai/chat")
+async def ai_chat(req: AIChatRequest, current_user: User = Depends(get_current_user)):
+    q = req.question.strip()
+    if not q:
+        raise HTTPException(status_code=400, detail="Pergunta vazia")
+    if len(q) > 1000:
+        raise HTTPException(status_code=400, detail="Pergunta muito longa (máx 1000 chars)")
+
+    if _HAS_LLM:
+        from ai_module import security_chat
+        answer = security_chat(q, req.context or "")
+    else:
+        from ai_module import security_chat  # usa fallback interno
+        answer = security_chat(q, req.context or "")
+
+    return {"question": q, "answer": answer, "llm_used": _HAS_LLM}
+
+
+class PentestPlanRequest(BaseModel):
+    target: str = ""
+    scope: str = ""
+    technologies: str = ""
+    duration: str = "5 dias"
+    objective: str = "full"
+
+@app.post("/api/ai/pentest-plan")
+async def ai_pentest_plan(req: PentestPlanRequest, current_user: User = Depends(get_current_user)):
+    if _HAS_LLM:
+        from ai_module import generate_pentest_plan
+        plan = generate_pentest_plan(req.dict())
+    else:
+        from ai_module import generate_pentest_plan
+        plan = generate_pentest_plan(req.dict())
+    return {"plan": plan, "llm_used": _HAS_LLM}
+
+
+class RemediationAIRequest(BaseModel):
+    technique_id: str
+    technique_name: str
+    context: Optional[str] = ""
+
+@app.post("/api/ai/remediation")
+async def ai_remediation(req: RemediationAIRequest, current_user: User = Depends(get_current_user)):
+    from ai_module import remediation_steps
+    steps = remediation_steps(req.technique_id, req.technique_name, req.context or "")
+    return {"technique_id": req.technique_id, "steps": steps, "llm_used": _HAS_LLM}
+
+
+class IOCScoringRequest(BaseModel):
+    texts: List[str]
+
+@app.post("/api/ai/score-iocs")
+async def ai_score_iocs(req: IOCScoringRequest, current_user: User = Depends(get_current_user)):
+    texts = [t.strip() for t in req.texts if t.strip()][:50]
+    if not texts:
+        raise HTTPException(status_code=400, detail="Lista de IOCs vazia")
+
+    if _HAS_ML:
+        engine = _get_ml_engine()
+        result = engine.score_iocs(texts)
+    else:
+        from ai_module import threat_score
+        result = threat_score(texts)
+
+    return result
+
+
+class NextTechRequest(BaseModel):
+    found_tactics: List[str]
+    tested_ids: List[str] = []
+
+@app.post("/api/ai/next-techniques")
+async def ai_next_techniques(req: NextTechRequest, current_user: User = Depends(get_current_user)):
+    if _HAS_ML:
+        engine = _get_ml_engine()
+        recs = engine.predict_next_techniques(req.found_tactics, req.tested_ids)
+        chain = engine.get_chain_map(req.found_tactics)
+    else:
+        from ml_engine import TechniqueAdvisor
+        adv = TechniqueAdvisor()
+        recs = adv.recommend(req.found_tactics, set(req.tested_ids))
+        chain = adv.attack_chain_map(req.found_tactics)
+    return {"recommendations": recs, "attack_chain": chain}
+
+
+# ── Cloud Identity Attack Paths ───────────────────────────────────────────────
+
+class CloudIdentityRequest(BaseModel):
+    account_id: str = ""
+    region: str = "us-east-1"
+    access_key: str = ""
+    secret_key: str = ""
+    role_to_assume: str = ""
+
+@app.post("/api/cloud/identity/aws-iam")
+async def cloud_identity_aws(req: CloudIdentityRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    attack_paths = [
+        {
+            "path_id": "AWS-IAM-001",
+            "title": "Privilege Escalation via iam:CreatePolicyVersion",
+            "technique": "T1098.001",
+            "tactic": "Privilege Escalation",
+            "severity": "Critical",
+            "cvss": 9.0,
+            "steps": [
+                "Identificar política IAM com iam:CreatePolicyVersion",
+                "Criar nova versão da política com AdministratorAccess",
+                "Definir nova versão como padrão (SetDefaultPolicyVersion)",
+                "Obter acesso administrativo completo",
+            ],
+            "blast_radius": "Acesso total à conta AWS",
+            "remediation": "Remova iam:CreatePolicyVersion de políticas não-admin. Use SCPs para restringir.",
+            "compliance": ["CIS AWS 1.22", "NIST SP 800-53 AC-6"],
+        },
+        {
+            "path_id": "AWS-IAM-002",
+            "title": "Lateral Movement via iam:PassRole + ec2:RunInstances",
+            "technique": "T1078.004",
+            "tactic": "Initial Access",
+            "severity": "High",
+            "cvss": 8.1,
+            "steps": [
+                "Obter permissões iam:PassRole e ec2:RunInstances",
+                "Lançar instância EC2 com role privilegiada",
+                "Acessar instance profile com metadados (IMDS)",
+                "Extrair credenciais temporárias da role",
+            ],
+            "blast_radius": "Movimentação lateral para serviços acessados pela role",
+            "remediation": "Use IMDSv2. Restrinja iam:PassRole a roles específicas.",
+            "compliance": ["CIS AWS 2.3", "AWS Well-Architected Security"],
+        },
+        {
+            "path_id": "AWS-IAM-003",
+            "title": "Data Exfiltration via S3 Bucket Policy Misconfiguration",
+            "technique": "T1530",
+            "tactic": "Collection",
+            "severity": "High",
+            "cvss": 7.5,
+            "steps": [
+                "Identificar buckets S3 com políticas públicas",
+                "Enumerar objetos sem autenticação",
+                "Exfiltrar dados sensíveis",
+            ],
+            "blast_radius": "Exposição de dados em buckets S3",
+            "remediation": "Habilite S3 Block Public Access. Revise políticas de bucket regularmente.",
+            "compliance": ["CIS AWS 2.6", "PCI-DSS 3.4", "LGPD Art. 46"],
+        },
+    ]
+
+    _audit(db, "Cloud Identity", "Simulação AWS IAM", req.account_id or "demo", current_user.id)
+    _operation_logs.append({"module": "Cloud Identity", "action": "AWS IAM Scan", "details": req.account_id or "demo", "timestamp": datetime.utcnow().isoformat()})
+    return {
+        "provider": "AWS",
+        "account_id": req.account_id or "demo-account",
+        "region": req.region,
+        "scan_time": datetime.utcnow().isoformat(),
+        "attack_paths": attack_paths,
+        "summary": {
+            "total_paths": len(attack_paths),
+            "critical": sum(1 for p in attack_paths if p["severity"] == "Critical"),
+            "high": sum(1 for p in attack_paths if p["severity"] == "High"),
+        },
+    }
+
+
+class EntraIDRequest(BaseModel):
+    tenant_id: str = ""
+    client_id: str = ""
+
+@app.post("/api/cloud/identity/entra-id")
+async def cloud_identity_entra(req: EntraIDRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    attack_paths = [
+        {
+            "path_id": "ENTRA-001",
+            "title": "Pass-the-Hash via NTLM Relay",
+            "technique": "T1550.002",
+            "tactic": "Lateral Movement",
+            "severity": "Critical",
+            "cvss": 9.1,
+            "steps": [
+                "Capturar hash NTLM via Responder ou injeção de UNC path",
+                "Realizar relay NTLM para serviços sem signing (SMB, LDAP)",
+                "Autenticar como usuário vítima",
+                "Escalar para Domain Admin via recursos comprometidos",
+            ],
+            "blast_radius": "Comprometimento de identidade de usuário de domínio",
+            "remediation": "Force SMB signing. Desative NTLMv1. Use Protected Users group.",
+            "compliance": ["NIST SP 800-53 IA-8", "CIS Control 4"],
+        },
+        {
+            "path_id": "ENTRA-002",
+            "title": "Consent Phishing via OAuth App",
+            "technique": "T1566.002",
+            "tactic": "Initial Access",
+            "severity": "High",
+            "cvss": 7.8,
+            "steps": [
+                "Registrar app maliciosa no Azure AD com permissões amplas",
+                "Enviar link de OAuth para usuário alvo",
+                "Usuário consente com permissões (Mail.Read, Files.Read, etc.)",
+                "Atacante acessa dados via Microsoft Graph API",
+            ],
+            "blast_radius": "Acesso a e-mails, arquivos e dados do usuário comprometido",
+            "remediation": "Restrinja consentimento de usuário. Habilite App Consent Policies. Use Conditional Access.",
+            "compliance": ["LGPD Art. 7", "ISO 27001 A.9.4", "NIST SP 800-53 AC-3"],
+        },
+        {
+            "path_id": "ENTRA-003",
+            "title": "Token Theft via Adversary-in-the-Middle (AiTM)",
+            "technique": "T1557",
+            "tactic": "Credential Access",
+            "severity": "Critical",
+            "cvss": 8.8,
+            "steps": [
+                "Configurar proxy AiTM (ex: Evilginx2) interceptando login Microsoft",
+                "Usuário realiza MFA normalmente (MFA bypass)",
+                "Proxy captura session cookie",
+                "Atacante usa cookie para autenticar sem MFA",
+            ],
+            "blast_radius": "Bypass de MFA e acesso completo à conta Microsoft 365",
+            "remediation": "Use Conditional Access com Token Binding. Habilite Sign-in Risk Policies. Use FIDO2.",
+            "compliance": ["CIS Control 6", "NIST SP 800-63B"],
+        },
+    ]
+
+    _audit(db, "Cloud Identity", "Simulação Entra ID", req.tenant_id or "demo", current_user.id)
+    return {
+        "provider": "Microsoft Entra ID",
+        "tenant_id": req.tenant_id or "demo-tenant",
+        "scan_time": datetime.utcnow().isoformat(),
+        "attack_paths": attack_paths,
+        "summary": {
+            "total_paths": len(attack_paths),
+            "critical": sum(1 for p in attack_paths if p["severity"] == "Critical"),
+            "high": sum(1 for p in attack_paths if p["severity"] == "High"),
+        },
+    }
+
+
+def _audit_global(module: str, action: str, details: str, user_id: str):
+    db = SessionLocal()
+    try:
+        log = AuditLog(user_id=user_id, module=module, action=action, details=details)
+        db.add(log)
+        db.commit()
+    except Exception:
+        pass
+    finally:
+        db.close()
+
+
+# ── Extended routes v1 (APT, EPSS/KEV, Compliance, Slack/Teams/Jira) ─────────
+
+try:
+    from ext_router import ext_router as _ext_router
+    app.include_router(_ext_router, prefix="/api")
+except Exception as _e:
+    import logging as _logging
+    _logging.getLogger("penteia").warning(f"ext_router not loaded: {_e}")
+
+# ── Extended routes v2 (BACEN PDF, ANPD, SSO, MSSP, API Keys, CrowdStrike) ───
+
+try:
+    from ext_router_v2 import ext_router_v2 as _ext_router_v2
+    app.include_router(_ext_router_v2, prefix="/api")
+except Exception as _e:
+    import logging as _logging
+    _logging.getLogger("penteia").warning(f"ext_router_v2 not loaded: {_e}")
+
+try:
+    from ext_router_v3 import ext_router_v3 as _ext_router_v3
+    app.include_router(_ext_router_v3, prefix="/api")
+except Exception as _e:
+    import logging as _logging
+    _logging.getLogger("penteia").warning(f"ext_router_v3 not loaded: {_e}")
+
+try:
+    from ext_router_v4 import ext_router_v4 as _ext_router_v4
+    app.include_router(_ext_router_v4, prefix="/api")
+except Exception as _e:
+    import logging as _logging
+    _logging.getLogger("penteia").warning(f"ext_router_v4 not loaded: {_e}")
+
+try:
+    from ext_router_v5 import ext_router_v5 as _ext_router_v5
+    app.include_router(_ext_router_v5, prefix="/api")
+except Exception as _e:
+    import logging as _logging
+    _logging.getLogger("penteia").warning(f"ext_router_v5 not loaded: {_e}")
 
 
 # ── Root ─────────────────────────────────────────────────────────────────────

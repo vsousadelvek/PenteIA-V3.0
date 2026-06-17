@@ -215,13 +215,11 @@ function scanPorts() {
                 <p><strong>Portas Abertas (${data.open_ports.length}):</strong></p>
                 <ul>
             `;
-            data.open_ports.forEach(port => {
-                const services = {
-                    20: 'ftp-data', 21: 'ftp', 22: 'ssh', 80: 'http', 443: 'https',
-                    3306: 'mysql', 5432: 'postgresql', 8080: 'http-proxy'
-                };
-                const service = services[port] || 'desconhecido';
-                html += `<li><span class="text-success">${port}</span> (${service})</li>`;
+            data.open_ports.forEach(item => {
+                const porta = item.porta || item;
+                const servico = item.servico || 'desconhecido';
+                const banner = item.banner ? ` - ${item.banner}` : '';
+                html += `<li><span class="text-success">${porta}</span> (${servico})${banner}</li>`;
             });
             html += '</ul>';
         } else {

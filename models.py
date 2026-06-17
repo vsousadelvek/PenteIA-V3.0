@@ -17,6 +17,10 @@ class User(Base):
     role = Column(String, default="user", server_default="'user'")
     credits = Column(Integer, default=0, server_default='0')
     status = Column(String, default="active", server_default="'active'")
+    # NOTE: SQLite does NOT add new columns to existing tables via create_all.
+    # Fresh installs get this automatically. Existing installs must run:
+    #   ALTER TABLE users ADD COLUMN org_id TEXT;
+    org_id = Column(String, nullable=True, default=None)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     listeners = relationship("Listener", back_populates="user", cascade="all, delete-orphan")
@@ -26,6 +30,52 @@ class User(Base):
     reports = relationship("Report", back_populates="user", cascade="all, delete-orphan")
     payloads = relationship("Payload", back_populates="user", cascade="all, delete-orphan")
     penteia_agents = relationship("PenteiaAgent", back_populates="owner", cascade="all, delete-orphan")
+
+class Organization(Base):
+    __tablename__ = "organizations"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String, nullable=False)
+    slug = Column(String, unique=True, index=True, nullable=False)
+    owner_user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    plan = Column(String, default="starter")  # starter, professional, enterprise, mssp
+    max_users = Column(Integer, default=5)
+    max_simulations = Column(Integer, default=100)
+    settings = Column(JSON, default={})
+    white_label_name = Column(String, default="")
+    white_label_logo = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    users = relationship("User", foreign_keys="User.org_id", primaryjoin="Organization.id == User.org_id", lazy="dynamic")
+
+
+class ApiKey(Base):
+    __tablename__ = "api_keys"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    name = Column(String, nullable=False)
+    key_hash = Column(String, unique=True, nullable=False)
+    key_prefix = Column(String, nullable=False)  # first 12 chars for display: "pk_live_a3f8"
+    enabled = Column(Boolean, default=True)
+    last_used = Column(DateTime, nullable=True)
+    requests_count = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User")
+
+
+class SSOConfig(Base):
+    __tablename__ = "sso_configs"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    provider = Column(String, nullable=False)  # azure, google, okta, generic
+    client_id = Column(String, nullable=False)
+    client_secret_enc = Column(String, nullable=False)  # encrypted or plain for now
+    extra_config = Column(JSON, default={})  # tenant_id, domain, etc.
+    enabled = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
 
 class Listener(Base):
     __tablename__ = "listeners"
@@ -229,5 +279,93 @@ class CloudReconResult(Base):
     results = Column(JSON, default={})
     created_at = Column(DateTime, default=datetime.utcnow)
     completed_at = Column(DateTime, nullable=True)
+
+    user = relationship("User")
+
+
+class PhishingCampaign(Base):
+    __tablename__ = "phishing_campaigns"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    name = Column(String, nullable=False)
+    subject = Column(String, nullable=False)
+    sender_name = Column(String, default="IT Security")
+    sender_email = Column(String, default="security@company.com")
+    body_template = Column(String, default="")
+    landing_url = Column(String, default="")
+    status = Column(String, default="draft")  # draft, active, completed
+    total_targets = Column(Integer, default=0)
+    opened = Column(Integer, default=0)
+    clicked = Column(Integer, default=0)
+    credentials_harvested = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)
+
+    user = relationship("User")
+    targets = relationship("PhishingTarget", back_populates="campaign", cascade="all, delete-orphan")
+
+
+class PhishingTarget(Base):
+    __tablename__ = "phishing_targets"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    campaign_id = Column(String, ForeignKey("phishing_campaigns.id"), nullable=False)
+    email = Column(String, nullable=False)
+    name = Column(String, default="")
+    department = Column(String, default="")
+    opened = Column(Boolean, default=False)
+    clicked = Column(Boolean, default=False)
+    credential_harvested = Column(Boolean, default=False)
+    opened_at = Column(DateTime, nullable=True)
+    clicked_at = Column(DateTime, nullable=True)
+    harvested_at = Column(DateTime, nullable=True)
+    ip_address = Column(String, default="")
+    user_agent = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    campaign = relationship("PhishingCampaign", back_populates="targets")
+
+
+class SOCValidation(Base):
+    __tablename__ = "soc_validations"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    simulation_id = Column(String, ForeignKey("simulations.id"), nullable=True)
+    siem_type = Column(String, default="wazuh")
+    siem_url = Column(String, default="")
+    total_techniques = Column(Integer, default=0)
+    detected = Column(Integer, default=0)
+    not_detected = Column(Integer, default=0)
+    detection_rate_pct = Column(Float, default=0.0)
+    results = Column(JSON, default=[])
+    status = Column(String, default="completed")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User")
+
+
+class RemediationTicket(Base):
+    __tablename__ = "remediation_tickets"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    simulation_id = Column(String, nullable=True)
+    technique_id = Column(String, nullable=False)
+    title = Column(String, nullable=False)
+    description = Column(String, default="")
+    severity = Column(String, default="Medium")
+    cvss = Column(Float, default=0.0)
+    status = Column(String, default="open")  # open, in_progress, resolved, verified
+    assignee = Column(String, default="")
+    due_date = Column(DateTime, nullable=True)
+    remediation_steps = Column(String, default="")
+    compliance = Column(JSON, default=[])
+    external_ticket_id = Column(String, default="")
+    external_system = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+    resolved_at = Column(DateTime, nullable=True)
 
     user = relationship("User")

@@ -1,7 +1,8 @@
 import React, { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, Link } from 'react-router-dom'
 import { Shield, Lock, Eye, EyeOff } from 'lucide-react'
 import api from '../api'
+import { useToast } from '../components/Toast'
 
 const ERROR_MESSAGES = {
   'Invalid credentials': 'Usuário ou senha incorretos. Verifique e tente novamente.',
@@ -27,6 +28,16 @@ export default function Login({ onLoginSuccess }) {
   const [error, setError] = useState('')
   const [showPassword, setShowPassword] = useState(false)
   const navigate = useNavigate()
+  const toast = useToast()
+
+  const handleSSOLogin = async (provider) => {
+    try {
+      const r = await api.get('/api/auth/sso/authorize', { params: { provider, redirect_uri: window.location.origin + '/sso-callback' } })
+      const redirectUrl = r.data.authorization_url || r.data.url
+      if (redirectUrl) window.location.href = redirectUrl
+      else throw new Error('URL de autorização não retornada')
+    } catch (e) { toast('SSO não configurado ou indisponível', 'warning') }
+  }
 
   const handleSubmit = async (e) => {
     e.preventDefault()
@@ -176,11 +187,34 @@ export default function Login({ onLoginSuccess }) {
               {isLogin ? 'Solicitar criação de conta' : 'Fazer login'}
             </button>
           </div>
+
+          {/* SSO Login */}
+          <div className="mt-4 pt-4 border-t border-dark-600">
+            <p className="text-center text-xs text-gray-500 mb-3">ou acesse via SSO</p>
+            <div className="space-y-2">
+              <button onClick={() => handleSSOLogin('azure')} className="w-full flex items-center gap-3 px-4 py-2.5 bg-dark-700 hover:bg-dark-600 border border-dark-600 rounded-lg text-sm text-gray-300">
+                <span className="text-blue-400 font-bold text-xs">MS</span>
+                <span>Continuar com Microsoft Azure AD</span>
+              </button>
+              <button onClick={() => handleSSOLogin('google')} className="w-full flex items-center gap-3 px-4 py-2.5 bg-dark-700 hover:bg-dark-600 border border-dark-600 rounded-lg text-sm text-gray-300">
+                <span className="text-red-400 font-bold text-xs">G</span>
+                <span>Continuar com Google Workspace</span>
+              </button>
+              <button onClick={() => handleSSOLogin('okta')} className="w-full flex items-center gap-3 px-4 py-2.5 bg-dark-700 hover:bg-dark-600 border border-dark-600 rounded-lg text-sm text-gray-300">
+                <span className="text-blue-400 font-bold text-xs">OK</span>
+                <span>Continuar com Okta</span>
+              </button>
+            </div>
+          </div>
         </div>
 
-        <p className="text-center text-gray-600 text-xs">
-          Em caso de problemas de acesso, contate o administrador da plataforma.
-        </p>
+        <div className="flex items-center justify-center gap-4 text-xs text-gray-600">
+          <span>Problemas de acesso? Contate o administrador.</span>
+          <span>·</span>
+          <Link to="/pricing" className="text-gray-500 hover:text-gray-300 transition underline underline-offset-2">
+            Ver planos
+          </Link>
+        </div>
       </div>
     </div>
   )

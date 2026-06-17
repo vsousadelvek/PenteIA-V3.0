@@ -22,6 +22,46 @@ const AttackPath = lazy(() => import('./pages/AttackPath'))
 const ATTCKMatrix = lazy(() => import('./pages/ATTCKMatrix'))
 const VulnDB = lazy(() => import('./pages/VulnDB'))
 const Cloud = lazy(() => import('./pages/Cloud'))
+const Phishing = lazy(() => import('./pages/Phishing'))
+const SOCValidation = lazy(() => import('./pages/SOCValidation'))
+const Remediation = lazy(() => import('./pages/Remediation'))
+const Integrations = lazy(() => import('./pages/Integrations'))
+const Pricing = lazy(() => import('./pages/Pricing'))
+const CloudIdentity = lazy(() => import('./pages/CloudIdentity'))
+const AI = lazy(() => import('./pages/AI'))
+const APT = lazy(() => import('./pages/APT'))
+const Compliance = lazy(() => import('./pages/Compliance'))
+const ApiKeys = lazy(() => import('./pages/ApiKeys'))
+const Tenants = lazy(() => import('./pages/Tenants'))
+const ScheduledBAS = lazy(() => import('./pages/ScheduledBAS'))
+const PurpleTeam = lazy(() => import('./pages/PurpleTeam'))
+const PlaybookBuilder = lazy(() => import('./pages/PlaybookBuilder'))
+const BRFiscal = lazy(() => import('./pages/BRFiscal'))
+const AIScenarios = lazy(() => import('./pages/AIScenarios'))
+const RealExecution = lazy(() => import('./pages/RealExecution'))
+const MSSP = lazy(() => import('./pages/MSSP'))
+const ADAttacks = lazy(() => import('./pages/ADAttacks'))
+
+const SSOCallback = ({ onLoginSuccess }) => {
+  const [status, setStatus] = React.useState('processing')
+  React.useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const code = params.get('code'); const state = params.get('state')
+    if (!code) { setStatus('error'); return }
+    api.post('/api/auth/sso/callback', { code, state, redirect_uri: window.location.origin + '/sso-callback' })
+      .then(r => {
+        localStorage.setItem('token', r.data.access_token)
+        localStorage.setItem('username', r.data.username)
+        localStorage.setItem('is_admin', r.data.is_admin)
+        localStorage.setItem('user_role', r.data.role || 'user')
+        onLoginSuccess()
+        window.location.href = '/'
+      })
+      .catch(() => setStatus('error'))
+  }, [])
+  if (status === 'error') return <div className="flex items-center justify-center h-screen text-red-400">Erro no login SSO. Tente novamente.</div>
+  return <div className="flex items-center justify-center h-screen text-gray-400">Autenticando via SSO...</div>
+}
 
 const ProtectedRoute = ({ element }) => {
   const token = localStorage.getItem('token')
@@ -64,7 +104,10 @@ export default function App() {
   useEffect(() => {
     if (isAuthenticated) {
       api.get('/api/auth/me')
-        .then(res => setIsAdmin(res.data.is_admin || false))
+        .then(res => {
+          setIsAdmin(res.data.is_admin || false)
+          localStorage.setItem('user_role', res.data.role || 'user')
+        })
         .catch(() => setIsAdmin(false))
     } else {
       setIsAdmin(false)
@@ -75,6 +118,7 @@ export default function App() {
     localStorage.removeItem('token')
     localStorage.removeItem('username')
     localStorage.removeItem('is_admin')
+    localStorage.removeItem('user_role')
     setIsAuthenticated(false)
     window.location.href = '/login'
   }
@@ -104,6 +148,7 @@ export default function App() {
                     <Route path="/modules" element={<ProtectedRoute element={<Modules />} />} />
                     <Route path="/c2" element={<ProtectedRoute element={<C2 />} />} />
                     <Route path="/bas" element={<ProtectedRoute element={<BAS />} />} />
+                    <Route path="/playbook-builder" element={<ProtectedRoute element={<PlaybookBuilder />} />} />
                     <Route path="/evasion" element={<ProtectedRoute element={<Evasion />} />} />
                     <Route path="/operations" element={<ProtectedRoute element={<Operations />} />} />
                     <Route path="/reporting" element={<ProtectedRoute element={<Reporting />} />} />
@@ -114,6 +159,25 @@ export default function App() {
                     <Route path="/attck-matrix" element={<ProtectedRoute element={<ATTCKMatrix />} />} />
                     <Route path="/vulndb" element={<ProtectedRoute element={<VulnDB />} />} />
                     <Route path="/cloud" element={<ProtectedRoute element={<Cloud />} />} />
+                    <Route path="/phishing" element={<ProtectedRoute element={<Phishing />} />} />
+                    <Route path="/soc-validation" element={<ProtectedRoute element={<SOCValidation />} />} />
+                    <Route path="/remediation" element={<ProtectedRoute element={<Remediation />} />} />
+                    <Route path="/integrations" element={<ProtectedRoute element={<Integrations />} />} />
+                    <Route path="/pricing" element={<Pricing />} />
+                    <Route path="/cloud-identity" element={<ProtectedRoute element={<CloudIdentity />} />} />
+                    <Route path="/ai" element={<ProtectedRoute element={<AI />} />} />
+                    <Route path="/apt" element={<ProtectedRoute element={<APT />} />} />
+                    <Route path="/compliance" element={<ProtectedRoute element={<Compliance />} />} />
+                    <Route path="/api-keys" element={<ProtectedRoute element={<ApiKeys />} />} />
+                    <Route path="/tenants" element={<ProtectedRoute element={<Tenants />} />} />
+                    <Route path="/scheduled-bas" element={<ProtectedRoute element={<ScheduledBAS />} />} />
+                    <Route path="/purple-team" element={<ProtectedRoute element={<PurpleTeam />} />} />
+                    <Route path="/br-fiscal" element={<ProtectedRoute element={<BRFiscal />} />} />
+                    <Route path="/ai-scenarios" element={<ProtectedRoute element={<AIScenarios />} />} />
+                    <Route path="/real-execution" element={<ProtectedRoute element={<RealExecution />} />} />
+                    <Route path="/mssp" element={<ProtectedRoute element={<MSSP />} />} />
+                    <Route path="/ad-attacks" element={<ProtectedRoute element={<ADAttacks />} />} />
+                    <Route path="/sso-callback" element={<SSOCallback onLoginSuccess={handleLoginSuccess} />} />
                   </Routes>
                 </Suspense>
               </main>

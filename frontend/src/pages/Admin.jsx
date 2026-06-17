@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react'
 import {
   Users, Plus, Edit2, Trash2, CreditCard, RefreshCw,
   Search, ChevronUp, ChevronDown, X, Save, AlertTriangle,
-  UserCheck, Crown, Webhook, CheckCircle, XCircle, Loader
+  UserCheck, Crown, Webhook, CheckCircle, XCircle, Loader, ShieldCheck, ExternalLink
 } from 'lucide-react'
 import { useToast } from '../components/Toast'
 import api from '../api'
@@ -50,7 +50,7 @@ function WebhooksSection() {
     setTestingId(id)
     try {
       const r = await api.post(`/api/webhooks/${id}/test`)
-      toast(`Webhook respondeu: HTTP ${r.data.status}`, 'success')
+      toast(`Webhook respondeu: HTTP ${r.data?.status ?? 'OK'}`, 'success')
     } catch (err) {
       toast('Falha: ' + (err.response?.data?.detail || err.message), 'error')
     } finally {
@@ -225,10 +225,11 @@ function CreateUserModal({ onClose, onSuccess }) {
     setSaving(true)
     try {
       await api.post('/api/admin/users', form)
-      toast.success('Usuário criado com sucesso')
+      toast('Usuário criado com sucesso', 'success')
       onSuccess()
     } catch (err) {
-      toast.error(err.response?.data?.detail || 'Erro ao criar usuário')
+      toast(err.response?.data?.detail || 'Erro ao criar usuário', 'error')
+    } finally {
       setSaving(false)
     }
   }
@@ -292,10 +293,11 @@ function EditUserModal({ user, onClose, onSuccess }) {
     if (!payload.password) delete payload.password
     try {
       await api.put(`/api/admin/users/${user.id}`, payload)
-      toast.success('Usuário atualizado com sucesso')
+      toast('Usuário atualizado com sucesso', 'success')
       onSuccess()
     } catch (err) {
-      toast.error(err.response?.data?.detail || 'Erro ao atualizar')
+      toast(err.response?.data?.detail || 'Erro ao atualizar', 'error')
+    } finally {
       setSaving(false)
     }
   }
@@ -359,10 +361,11 @@ function CreditsUserModal({ user, onClose, onSuccess }) {
         action: act,
         amount: parseInt(amt) || 0,
       })
-      toast.success(`Créditos atualizados: ${res.data.credits} total`)
+      toast(`Créditos atualizados: ${res.data?.credits ?? '?'} total`, 'success')
       onSuccess()
     } catch (err) {
-      toast.error(err.response?.data?.detail || 'Erro ao atualizar créditos')
+      toast(err.response?.data?.detail || 'Erro ao atualizar créditos', 'error')
+    } finally {
       setSaving(false)
     }
   }
@@ -423,10 +426,10 @@ function DeleteUserModal({ user, onClose, onSuccess }) {
     setDeleting(true)
     try {
       await api.delete(`/api/admin/users/${user.id}`)
-      toast.success(`Usuário "${user.username}" deletado`)
+      toast(`Usuário "${user.username}" deletado`, 'success')
       onSuccess()
     } catch (err) {
-      toast.error(err.response?.data?.detail || 'Erro ao deletar')
+      toast(err.response?.data?.detail || 'Erro ao deletar', 'error')
       setDeleting(false)
     }
   }
@@ -458,6 +461,156 @@ function DeleteUserModal({ user, onClose, onSuccess }) {
   )
 }
 
+function SSOConfigSection() {
+  const toast = useToast()
+  const [ssoProvider, setSsoProvider] = useState('azure')
+  const [clientId, setClientId] = useState('')
+  const [clientSecret, setClientSecret] = useState('')
+  const [extraConfig, setExtraConfig] = useState({})
+  const [saving, setSaving] = useState(false)
+
+  const handleSave = async () => {
+    if (!clientId.trim() || !clientSecret.trim()) {
+      toast('Preencha Client ID e Client Secret', 'warning')
+      return
+    }
+    setSaving(true)
+    try {
+      await api.post('/api/auth/sso/configure', {
+        provider: ssoProvider,
+        client_id: clientId,
+        client_secret: clientSecret,
+        extra_config: extraConfig,
+      })
+      toast('Configuração SSO salva com sucesso!', 'success')
+    } catch (err) {
+      toast('Erro ao salvar: ' + (err.response?.data?.detail || err.message), 'error')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleTestSSO = async () => {
+    try {
+      const res = await api.get('/api/auth/sso/authorize', {
+        params: { provider: ssoProvider, redirect_uri: window.location.origin + '/sso-callback' }
+      })
+      const url = res.data?.authorization_url || res.data?.url
+      if (url) window.open(url, '_blank')
+      else toast('URL de autorização não retornada pelo servidor', 'error')
+    } catch (err) {
+      toast('Erro ao iniciar SSO: ' + (err.response?.data?.detail || err.message), 'error')
+    }
+  }
+
+  return (
+    <div className="bg-dark-800 border border-dark-600 rounded-xl p-6">
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-2">
+          <ShieldCheck className="w-5 h-5 text-indigo-400" />
+          <h2 className="text-xl font-bold text-gray-100">Configuração SSO</h2>
+        </div>
+        <button
+          onClick={handleTestSSO}
+          className="flex items-center gap-2 text-sm px-3 py-1.5 bg-dark-700 hover:bg-dark-600 border border-dark-600 text-gray-300 rounded transition"
+        >
+          <ExternalLink className="w-3.5 h-3.5" /> Testar SSO
+        </button>
+      </div>
+      <p className="text-gray-400 text-sm mb-5">Configure o provedor de identidade para login SSO (Single Sign-On) da plataforma.</p>
+
+      <div className="space-y-4">
+        <div>
+          <label className="block text-xs text-gray-400 mb-1">Provedor</label>
+          <select
+            className="select-dark w-full"
+            value={ssoProvider}
+            onChange={e => { setSsoProvider(e.target.value); setExtraConfig({}) }}
+          >
+            <option value="azure">Microsoft Azure AD</option>
+            <option value="google">Google Workspace</option>
+            <option value="okta">Okta</option>
+            <option value="generic">Generic OIDC</option>
+          </select>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">Client ID</label>
+            <input
+              type="text"
+              className="input-dark w-full font-mono text-sm"
+              placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+              value={clientId}
+              onChange={e => setClientId(e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">Client Secret</label>
+            <input
+              type="password"
+              className="input-dark w-full font-mono text-sm"
+              placeholder="••••••••••••••••"
+              value={clientSecret}
+              onChange={e => setClientSecret(e.target.value)}
+            />
+          </div>
+        </div>
+
+        {ssoProvider === 'azure' && (
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">Tenant ID</label>
+            <input
+              type="text"
+              className="input-dark w-full font-mono text-sm"
+              placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+              value={extraConfig.tenant_id || ''}
+              onChange={e => setExtraConfig(ec => ({ ...ec, tenant_id: e.target.value }))}
+            />
+          </div>
+        )}
+
+        {ssoProvider === 'okta' && (
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">Okta Domain</label>
+            <input
+              type="text"
+              className="input-dark w-full font-mono text-sm"
+              placeholder="sua-empresa.okta.com"
+              value={extraConfig.domain || ''}
+              onChange={e => setExtraConfig(ec => ({ ...ec, domain: e.target.value }))}
+            />
+          </div>
+        )}
+
+        {ssoProvider === 'generic' && (
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">Issuer URL</label>
+            <input
+              type="text"
+              className="input-dark w-full font-mono text-sm"
+              placeholder="https://sso.suaempresa.com"
+              value={extraConfig.issuer_url || ''}
+              onChange={e => setExtraConfig(ec => ({ ...ec, issuer_url: e.target.value }))}
+            />
+          </div>
+        )}
+
+        <div className="pt-2">
+          <button
+            onClick={handleSave}
+            disabled={saving}
+            className="flex items-center gap-2 px-5 py-2.5 bg-indigo-700 hover:bg-indigo-600 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition"
+          >
+            {saving ? <Loader className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+            Salvar Configuração SSO
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function Admin() {
   const toast = useToast()
   const [users, setUsers] = useState([])
@@ -478,10 +631,10 @@ export default function Admin() {
         api.get('/api/admin/users'),
         api.get('/api/admin/stats'),
       ])
-      setUsers(ur.data.users)
+      setUsers(ur.data.users || [])
       setStats(sr.data)
     } catch {
-      toast.error('Sem permissão ou erro ao carregar dados do admin')
+      toast('Sem permissão ou erro ao carregar dados do admin', 'error')
     } finally {
       setLoading(false)
     }
@@ -496,8 +649,8 @@ export default function Admin() {
 
   const filtered = users
     .filter(u =>
-      u.username.toLowerCase().includes(search.toLowerCase()) ||
-      u.email.toLowerCase().includes(search.toLowerCase())
+      (u.username ?? '').toLowerCase().includes(search.toLowerCase()) ||
+      (u.email ?? '').toLowerCase().includes(search.toLowerCase())
     )
     .sort((a, b) => {
       let av = a[sortField] ?? '', bv = b[sortField] ?? ''
@@ -595,7 +748,7 @@ export default function Admin() {
                     </span>
                   </td>
                   <td className="px-4 py-3 text-xs text-gray-500">
-                    {new Date(user.created_at).toLocaleDateString('pt-BR')}
+                    {user.created_at ? new Date(user.created_at).toLocaleDateString('pt-BR') : '—'}
                   </td>
                   <td className="px-4 py-3">
                     <div className="flex items-center justify-end gap-1">
@@ -658,6 +811,8 @@ export default function Admin() {
       )}
 
       <WebhooksSection />
+
+      <SSOConfigSection />
     </div>
   )
 }

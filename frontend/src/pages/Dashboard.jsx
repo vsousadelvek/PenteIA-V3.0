@@ -49,6 +49,8 @@ export default function Dashboard() {
   const [wsStatus, setWsStatus] = useState('disconnected')
   const wsRef = useRef(null)
   const username = localStorage.getItem('username') || 'Pesquisador'
+  const userRole = localStorage.getItem('user_role') || 'user'
+  const isAdmin = localStorage.getItem('is_admin') === 'true'
 
   useEffect(() => {
     const token = localStorage.getItem('token')
@@ -58,7 +60,6 @@ export default function Dashboard() {
         const ws = new WebSocket(`ws://localhost:8000/ws/dashboard`)
         wsRef.current = ws
         ws.onopen = () => setWsStatus('connected')
-        ws.onclose = () => { setWsStatus('disconnected'); setTimeout(connect, 5000) }
         ws.onerror = () => ws.close()
         ws.onmessage = (e) => {
           try {
@@ -75,7 +76,8 @@ export default function Dashboard() {
             }
           } catch {}
         }
-        ws.onmessage._ping = setInterval(() => { if (ws.readyState === 1) ws.send('ping') }, 25000)
+        const pingId = setInterval(() => { if (ws.readyState === 1) ws.send('ping') }, 25000)
+        ws.onclose = () => { clearInterval(pingId); setWsStatus('disconnected'); setTimeout(connect, 5000) }
       } catch {}
     }
     connect()
@@ -115,7 +117,7 @@ export default function Dashboard() {
     .filter(s => s.status === 'completed')
     .slice(-10)
     .map(s => ({
-      date: format(new Date(s.date), 'dd/MM', { locale: ptBR }),
+      date: s.date ? format(new Date(s.date), 'dd/MM', { locale: ptBR }) : '—',
       risco: parseFloat(s.score?.toFixed(1) || 0),
       detecção: parseFloat((s.results?.detection_coverage_pct || 0).toFixed(1)),
       target: s.target,
@@ -129,12 +131,53 @@ export default function Dashboard() {
   const totalCritical = completedSims.reduce((a, b) => a + (b.critical || 0), 0)
   const latestSims = simulations.filter(s => s.status === 'completed').slice(0, 5)
 
+  // CTEM widget data — most recent completed simulation
+  const mostRecentSim = simulations
+    .filter(s => s.status === 'completed')
+    .sort((a, b) => (a.date && b.date ? new Date(b.date) - new Date(a.date) : 0))[0] || null
+  const ctemScore = mostRecentSim ? (mostRecentSim.score || 0) : null
+  const ctemExposure = ctemScore !== null ? parseFloat((100 - ctemScore).toFixed(1)) : null
+  const ctemDate = mostRecentSim?.date
+    ? format(new Date(mostRecentSim.date), "dd/MM/yyyy 'às' HH:mm", { locale: ptBR })
+    : null
+  const ctemBarColor = ctemExposure === null
+    ? 'bg-gray-600'
+    : ctemExposure > 60
+      ? 'bg-red-500'
+      : ctemExposure > 20
+        ? 'bg-yellow-500'
+        : 'bg-green-500'
+
+  // Top 3 critical techniques from most recent sim (for Executive Summary)
+  const top3Techniques = mostRecentSim
+    ? (mostRecentSim.results?.techniques || [])
+        .filter(t => t.status === 'found' && t.cvss_severity === 'Critical')
+        .slice(0, 3)
+    : []
+
   return (
     <div className="space-y-8">
       <div className="slide-in">
-        <h1 className="text-4xl font-bold text-gray-100 mb-1">
-          Bem-vindo, <span className="text-red-500">{username}</span>
-        </h1>
+        <div className="flex items-center gap-3 mb-1">
+          <h1 className="text-4xl font-bold text-gray-100">
+            Bem-vindo, <span className="text-red-500">{username}</span>
+          </h1>
+          {(() => {
+            const roleStyles = {
+              admin:    'bg-red-900/40 text-red-400 border-red-800',
+              ciso:     'bg-purple-900/40 text-purple-400 border-purple-800',
+              soc:      'bg-blue-900/40 text-blue-400 border-blue-800',
+              redteam:  'bg-orange-900/40 text-orange-400 border-orange-800',
+              readonly: 'bg-gray-900/40 text-gray-400 border-gray-700',
+            }
+            const style = roleStyles[userRole] || 'bg-gray-900/40 text-gray-400 border-gray-700'
+            return (
+              <span className={`text-xs px-2 py-0.5 rounded-full border ${style} font-semibold tracking-wide`}>
+                {userRole.toUpperCase()}
+              </span>
+            )
+          })()}
+        </div>
         <p className="text-gray-400">Plataforma de testes de segurança — PenteIA v4.0 · Apenas ambientes autorizados</p>
       </div>
 
@@ -146,12 +189,49 @@ export default function Dashboard() {
         </p>
       </div>
 
-      {/* 4 Metric Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      {/* ReadOnly Notice */}
+      {userRole === 'readonly' && (
+        <div className="bg-yellow-900/20 border border-yellow-800/40 rounded p-3 text-xs text-yellow-400">
+          Modo somente leitura — ações de execução desabilitadas
+        </div>
+      )}
+
+      {/* Metric Cards + CTEM Widget */}
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
         <StatCard title="Status da Plataforma" value={stats.status === 'online' ? 'Online' : 'Offline'} icon={Activity} color={stats.status === 'online' ? 'green' : 'red'} />
-        <StatCard title="Score Médio de Risco" value={`${avgScore}%`} icon={BarChart2} color="orange" />
+        <StatCard title="Score Médio de Risco" value={`${avgScore}%`} icon={BarChart2} color="yellow" />
         <StatCard title="Vulnerabilidades Críticas" value={totalCritical} icon={AlertCircle} color="red" />
         <StatCard title="Simulações Realizadas" value={completedSims.length} icon={Compass} color="blue" />
+
+        {/* CTEM — Exposição Contínua */}
+        <div className="card-dark p-4 border-l-4 border-red-600/50 flex flex-col gap-2 col-span-2 md:col-span-1">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold text-gray-400 uppercase tracking-wide">Exposição à Ameaças</span>
+            <Eye className="w-4 h-4 text-red-400" />
+          </div>
+          {ctemExposure !== null ? (
+            <>
+              <div className="text-3xl font-black text-gray-100">
+                {ctemExposure}%
+              </div>
+              <div className="w-full bg-dark-700 rounded-full h-1.5">
+                <div
+                  className={`h-1.5 rounded-full transition-all ${ctemBarColor}`}
+                  style={{ width: `${Math.min(ctemExposure, 100)}%` }}
+                />
+              </div>
+              <p className="text-xs text-gray-500">Última simulação: {ctemDate}</p>
+            </>
+          ) : (
+            <p className="text-xs text-gray-500 mt-1">Nenhuma simulação concluída</p>
+          )}
+          <button
+            onClick={() => navigate('/bas')}
+            className="mt-auto text-xs text-cyan-400 hover:text-cyan-300 border border-cyan-800/50 hover:border-cyan-600 px-2 py-0.5 rounded transition self-start"
+          >
+            Ver BAS →
+          </button>
+        </div>
       </div>
 
       {/* Charts row */}
@@ -226,7 +306,7 @@ export default function Dashboard() {
                   return (
                     <tr key={s.id} className="border-b border-dark-700/50 hover:bg-dark-700/30 transition">
                       <td className="py-2.5 text-gray-300 font-mono text-xs">{s.target}</td>
-                      <td className="py-2.5 text-gray-400 text-xs">{format(new Date(s.date), 'dd/MM/yyyy HH:mm', { locale: ptBR })}</td>
+                      <td className="py-2.5 text-gray-400 text-xs">{s.date ? format(new Date(s.date), 'dd/MM/yyyy HH:mm', { locale: ptBR }) : '—'}</td>
                       <td className="py-2.5 text-center">
                         <span className={`px-2 py-0.5 rounded text-xs font-bold ${scoreColor}`}>{score.toFixed(1)}%</span>
                       </td>
@@ -246,6 +326,52 @@ export default function Dashboard() {
                 })}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+
+      {/* Executive Summary — visible to ciso and admin only */}
+      {(userRole === 'ciso' || isAdmin) && (
+        <div className="card-dark p-5 border-l-4 border-purple-600">
+          <div className="flex items-center gap-2 mb-3">
+            <Shield className="w-4 h-4 text-purple-400" />
+            <h3 className="text-base font-bold text-gray-100">Resumo Executivo</h3>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="bg-dark-700/50 rounded-lg p-4">
+              <p className="text-xs text-gray-500 mb-1 uppercase tracking-wide">Score de Risco Geral</p>
+              <p className={`text-3xl font-black ${parseFloat(avgScore) >= 60 ? 'text-red-400' : parseFloat(avgScore) >= 30 ? 'text-yellow-400' : 'text-green-400'}`}>
+                {avgScore}%
+              </p>
+              <p className="text-xs text-gray-500 mt-1">Média das últimas {completedSims.length} simulação(ões)</p>
+            </div>
+            <div className="bg-dark-700/50 rounded-lg p-4">
+              <p className="text-xs text-gray-500 mb-2 uppercase tracking-wide">Top Técnicas Críticas</p>
+              {top3Techniques.length > 0 ? (
+                <ul className="space-y-1">
+                  {top3Techniques.map((t, i) => (
+                    <li key={i} className="text-xs text-red-300 flex items-start gap-1">
+                      <span className="text-red-600 mt-0.5">▸</span>
+                      <span>{t.technique_id ? `[${t.technique_id}] ` : ''}{t.name || t.technique || 'Técnica crítica'}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-xs text-gray-500">Nenhuma técnica crítica detectada</p>
+              )}
+            </div>
+            <div className="bg-dark-700/50 rounded-lg p-4 flex flex-col justify-between">
+              <div>
+                <p className="text-xs text-gray-500 mb-1 uppercase tracking-wide">Relatórios & Compliance</p>
+                <p className="text-xs text-gray-400">Exporte achados mapeados para LGPD, ISO 27001 e PCI DSS.</p>
+              </div>
+              <button
+                onClick={() => navigate('/reporting')}
+                className="mt-3 text-xs text-purple-400 hover:text-purple-300 border border-purple-800/50 hover:border-purple-600 px-3 py-1 rounded transition self-start"
+              >
+                Ir para Relatórios →
+              </button>
+            </div>
           </div>
         </div>
       )}
