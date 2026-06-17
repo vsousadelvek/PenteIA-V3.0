@@ -104,3 +104,6 @@ ext_router_v4.py
 # Node.js
 node_modules/
 frontend/node_modules/
+
+# Evidências forenses geradas em runtime (dados sensíveis do ambiente)
+evidence/
