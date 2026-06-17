@@ -399,6 +399,63 @@ def enrich_batch(cve_list: list[dict]) -> list[dict]:
     return results
 
 
+# ── KEV diff tracking ────────────────────────────────────────────────────────
+
+_KEV_SNAPSHOT_FILE = os.path.join(_DIR, "_kev_snapshot.json")
+
+
+def get_kev_ids() -> set[str]:
+    """Return the current set of CVE IDs in CISA KEV (uses cache)."""
+    with _kev_lock:
+        cache = _load_cache(_KEV_CACHE_FILE)
+        vulns = cache.get("vulnerabilities", [])
+    return {v.get("cveID", "").upper() for v in vulns if v.get("cveID")}
+
+
+def get_kev_diff() -> dict:
+    """
+    Compare current KEV against the last saved snapshot.
+    Returns {"new_entries": [...], "removed_entries": [...], "snapshot_updated": bool}
+    Saves a new snapshot after computing the diff.
+    """
+    current = get_kev_ids()
+    try:
+        with open(_KEV_SNAPSHOT_FILE, "r", encoding="utf-8") as fh:
+            prev_data = json.load(fh)
+        previous = set(prev_data.get("kev_ids", []))
+    except Exception:
+        previous = set()
+
+    new_entries = sorted(current - previous)
+    removed_entries = sorted(previous - current)
+
+    # Save new snapshot
+    try:
+        with open(_KEV_SNAPSHOT_FILE, "w", encoding="utf-8") as fh:
+            json.dump({"kev_ids": sorted(current), "updated_at": _now_iso()}, fh)
+        snapshot_updated = True
+    except Exception:
+        snapshot_updated = False
+
+    return {
+        "new_entries": new_entries,
+        "removed_entries": removed_entries,
+        "total_current": len(current),
+        "total_previous": len(previous),
+        "snapshot_updated": snapshot_updated,
+        "checked_at": _now_iso(),
+    }
+
+
+def check_kev_intersection(tracked_cves: list[str]) -> list[str]:
+    """
+    Given a list of CVE IDs tracked for a client, return which ones
+    are in the current CISA KEV (require immediate attention).
+    """
+    kev_ids = get_kev_ids()
+    return [c.upper() for c in tracked_cves if c.upper() in kev_ids]
+
+
 # ---------------------------------------------------------------------------
 # Module-level self-test (python epss_engine.py)
 # ---------------------------------------------------------------------------
