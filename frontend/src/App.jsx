@@ -41,6 +41,7 @@ const AIScenarios = lazy(() => import('./pages/AIScenarios'))
 const RealExecution = lazy(() => import('./pages/RealExecution'))
 const MSSP = lazy(() => import('./pages/MSSP'))
 const ADAttacks = lazy(() => import('./pages/ADAttacks'))
+const Billing = lazy(() => import('./pages/Billing'))
 
 const SSOCallback = ({ onLoginSuccess }) => {
   const [status, setStatus] = React.useState('processing')
@@ -177,6 +178,7 @@ export default function App() {
                     <Route path="/real-execution" element={<ProtectedRoute element={<RealExecution />} />} />
                     <Route path="/mssp" element={<ProtectedRoute element={<MSSP />} />} />
                     <Route path="/ad-attacks" element={<ProtectedRoute element={<ADAttacks />} />} />
+                    <Route path="/billing" element={<ProtectedRoute element={<Billing />} />} />
                     <Route path="/sso-callback" element={<SSOCallback onLoginSuccess={handleLoginSuccess} />} />
                   </Routes>
                 </Suspense>

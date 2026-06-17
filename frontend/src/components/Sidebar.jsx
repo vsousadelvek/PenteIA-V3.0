@@ -6,7 +6,7 @@ import {
   ChevronLeft, ChevronRight, X, Crosshair, Bell, Database, Grid,
   Globe, Package, Mail, ShieldCheck, Wrench, Link2, DollarSign, Fingerprint, Brain,
   Key, Building2, BookOpen, Swords, Calendar, Flag, Terminal, Users,
-  Server, Briefcase,
+  Server, Briefcase, CreditCard,
 } from 'lucide-react'
 import { useEnv, saveEnv } from '../hooks/useEnv'
 import api from '../api'
@@ -78,6 +78,12 @@ const GROUPS = [
       { path: '/reporting', label: 'Relatórios', Icon: FileText },
       { path: '/integrations', label: 'Integrações', Icon: Link2 },
       { path: '/api-keys', label: 'API Keys', Icon: Key },
+    ],
+  },
+  {
+    label: 'Conta',
+    items: [
+      { path: '/billing', label: 'Plano & Tempo', Icon: CreditCard },
     ],
   },
   {

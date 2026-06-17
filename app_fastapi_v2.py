@@ -113,6 +113,25 @@ async def _startup():
     from models import Base
     Base.metadata.create_all(bind=engine)
 
+    # Migrate existing users table — add billing columns if absent (SQLite ALTER TABLE)
+    try:
+        with engine.connect() as _conn:
+            for _col, _def in [
+                ("plan_type", "TEXT DEFAULT 'free'"),
+                ("plan_expires_at", "DATETIME"),
+                ("minutes_quota", "INTEGER DEFAULT 10"),
+                ("minutes_used", "INTEGER DEFAULT 0"),
+            ]:
+                try:
+                    _conn.execute(__import__("sqlalchemy").text(
+                        f"ALTER TABLE users ADD COLUMN {_col} {_def}"
+                    ))
+                    _conn.commit()
+                except Exception:
+                    pass  # column already exists
+    except Exception:
+        pass
+
     db_startup = SessionLocal()
     try:
         # Cleanup orphan simulations stuck in "running" for more than 2 hours
@@ -129,6 +148,18 @@ async def _startup():
 
         if not _scheduler:
             return
+
+        # CredPix PIX checker — every 15 seconds
+        try:
+            _scheduler.add_job(
+                _credpix_checker_job,
+                trigger="interval",
+                seconds=15,
+                id="credpix_checker_job",
+                replace_existing=True,
+            )
+        except Exception:
+            pass
 
         # KEV check job — every 6 hours
         try:
@@ -1291,11 +1322,33 @@ def _bas_run(sim_id: str, playbook_name: str, target: str, severity: str, num_te
         "timestamp": datetime.utcnow().isoformat(),
     })
 
+    # Fecha sessão de uso e desconta tempo
+    try:
+        from subscription_engine import close_session_by_ref
+        db_usage = SessionLocal()
+        try:
+            close_session_by_ref(sim_id, "bas", db_usage)
+        finally:
+            db_usage.close()
+    except Exception:
+        pass
+
 @app.post("/api/bas/execute")
 async def execute_playbook(
     req: PlaybookExecuteRequest,
     current_user: User = Depends(get_current_user), db: Session = Depends(get_db)
 ):
+    # Gate de tempo e simultaneidade
+    try:
+        from subscription_engine import can_start_attack, open_session
+        allowed, reason = can_start_attack(current_user, db)
+        if not allowed:
+            raise HTTPException(status_code=402, detail=reason)
+    except HTTPException:
+        raise
+    except Exception:
+        pass  # se subscription_engine não disponível, libera sem gate
+
     playbook = db.query(Playbook).filter(Playbook.id == req.playbook_id, Playbook.user_id == current_user.id).first()
     if not playbook:
         raise HTTPException(status_code=404, detail="Playbook não encontrado")
@@ -1303,6 +1356,14 @@ async def execute_playbook(
     db.add(simulation)
     db.commit()
     db.refresh(simulation)
+
+    # Abre sessão de uso (rastreia tempo do ataque)
+    try:
+        from subscription_engine import open_session
+        open_session(current_user.id, "bas", db, reference_id=simulation.id)
+    except Exception:
+        pass
+
     threading.Thread(
         target=_bas_run,
         args=(simulation.id, playbook.name, req.target, playbook.severity, playbook.techniques),
@@ -2610,7 +2671,19 @@ async def diag_ssh_proxy(req: SSHProxyTestRequest, current_user: User = Depends(
     return result
 
 @app.post("/api/ddos/start")
-async def start_ddos(req: DDoSStartRequest, current_user: User = Depends(get_current_user)):
+async def start_ddos(req: DDoSStartRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # Gate de tempo e simultaneidade
+    try:
+        from subscription_engine import can_start_attack, open_session
+        allowed, reason = can_start_attack(current_user, db)
+        if not allowed:
+            raise HTTPException(status_code=402, detail=reason)
+        open_session(current_user.id, "ddos", db)
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
     # Resolve domain → IP (necessário para métodos Layer 3/4 que usam raw sockets)
     try:
         resolved_host = await asyncio.get_event_loop().run_in_executor(
@@ -3809,6 +3882,47 @@ def _run_scheduled_sim(scan_id: str):
         db4.commit()
     finally:
         db4.close()
+
+
+def _credpix_checker_job():
+    """
+    Scheduled job: polls CredPix every 15s for pending PIX deposits.
+    On confirmed: activates plan or adds extra hours for the user.
+    """
+    import logging as _log
+    _cl = _log.getLogger("penteia.billing")
+    try:
+        from credpix_engine import verify_pix
+        from subscription_engine import activate_plan, add_extra_hours
+        from models import PixDeposit, User as _User
+        db_b = SessionLocal()
+        try:
+            pending = db_b.query(PixDeposit).filter(PixDeposit.status == "pending").all()
+            for deposit in pending:
+                if not deposit.external_id:
+                    continue
+                try:
+                    status = verify_pix(deposit.external_id)
+                    if status == "confirmed":
+                        deposit.status = "confirmed"
+                        deposit.confirmed_at = datetime.utcnow()
+                        user = db_b.query(_User).filter(_User.id == deposit.user_id).first()
+                        if user:
+                            if deposit.deposit_type == "subscription" and deposit.plan_type:
+                                activate_plan(user, deposit.plan_type, db_b)
+                            elif deposit.deposit_type == "extra_hours" and deposit.extra_pack:
+                                add_extra_hours(user, deposit.extra_pack, db_b)
+                        db_b.commit()
+                        _cl.info("PIX confirmado: deposit=%s user=%s", deposit.id, deposit.user_id)
+                    elif status == "expired":
+                        deposit.status = "expired"
+                        db_b.commit()
+                except Exception as exc:
+                    _cl.warning("CredPix check failed for %s: %s", deposit.external_id, exc)
+        finally:
+            db_b.close()
+    except Exception as exc:
+        _log.getLogger("penteia.billing").error("CredPix checker job failed: %s", exc)
 
 
 def _kev_check_job():
@@ -6640,6 +6754,13 @@ try:
 except Exception as _e:
     import logging as _logging
     _logging.getLogger("penteia").warning(f"ext_router_v6 not loaded: {_e}")
+
+try:
+    from ext_router_billing import billing_router as _billing_router
+    app.include_router(_billing_router, prefix="/api")
+except Exception as _e:
+    import logging as _logging
+    _logging.getLogger("penteia").warning(f"billing_router not loaded: {_e}")
 
 
 # ── Root ─────────────────────────────────────────────────────────────────────

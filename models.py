@@ -15,8 +15,12 @@ class User(Base):
     password_hash = Column(String, nullable=False)
     is_admin = Column(Boolean, default=False, server_default='0')
     role = Column(String, default="user", server_default="'user'")
-    credits = Column(Integer, default=0, server_default='0')
+    credits = Column(Integer, default=0, server_default='0')  # legado — não usado
     status = Column(String, default="active", server_default="'active'")
+    plan_type = Column(String, default="free", server_default="'free'")
+    plan_expires_at = Column(DateTime, nullable=True)
+    minutes_quota = Column(Integer, nullable=True, default=10)
+    minutes_used = Column(Integer, default=0, server_default='0')
     # NOTE: SQLite does NOT add new columns to existing tables via create_all.
     # Fresh installs get this automatically. Existing installs must run:
     #   ALTER TABLE users ADD COLUMN org_id TEXT;
@@ -367,6 +371,42 @@ class RemediationTicket(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
     resolved_at = Column(DateTime, nullable=True)
+
+    user = relationship("User")
+
+
+class PixDeposit(Base):
+    """Registro de pagamentos PIX via CredPix (assinaturas e horas extras)."""
+    __tablename__ = "pix_deposits"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    deposit_type = Column(String, nullable=False)   # subscription | extra_hours
+    plan_type = Column(String, nullable=True)        # researcher | pro | business
+    extra_pack = Column(String, nullable=True)       # 5h | 15h
+    amount_brl = Column(Integer, nullable=False)
+    minutes_granted = Column(Integer, nullable=True)
+    external_id = Column(String, nullable=True)      # IDPagamento CredPix
+    qr_code = Column(String, nullable=True)          # CopiaeCola PIX
+    status = Column(String, default="pending")       # pending | confirmed | expired
+    created_at = Column(DateTime, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=True)     # PIX expira em 30min
+    confirmed_at = Column(DateTime, nullable=True)
+
+    user = relationship("User")
+
+
+class UsageSession(Base):
+    """Rastreamento de tempo real de ataques ativos."""
+    __tablename__ = "usage_sessions"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    session_type = Column(String, nullable=False)   # bas | ddos | recon | ad | cloud | phishing | execution
+    started_at = Column(DateTime, default=datetime.utcnow)
+    ended_at = Column(DateTime, nullable=True)
+    minutes_billed = Column(Integer, nullable=True)
+    reference_id = Column(String, nullable=True)    # simulation_id ou job_id
 
     user = relationship("User")
 
