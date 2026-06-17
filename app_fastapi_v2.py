@@ -129,6 +129,19 @@ async def _startup():
 
         if not _scheduler:
             return
+
+        # KEV check job — every 6 hours
+        try:
+            _scheduler.add_job(
+                _kev_check_job,
+                trigger="interval",
+                hours=6,
+                id="kev_check_job",
+                replace_existing=True,
+            )
+        except Exception:
+            pass
+
         enabled_scans = db_startup.query(ScheduledScan).filter(ScheduledScan.enabled == True).all()
         for scan in enabled_scans:
             days = _interval_days(scan.interval)
@@ -3796,6 +3809,28 @@ def _run_scheduled_sim(scan_id: str):
         db4.commit()
     finally:
         db4.close()
+
+
+def _kev_check_job():
+    """
+    Scheduled job: checks CISA KEV for new entries every 6 hours.
+    If new CVEs are added to KEV, logs a warning — future: trigger BAS for affected clients.
+    """
+    import logging as _log
+    _kl = _log.getLogger("penteia.kev")
+    try:
+        from epss_engine import get_kev_diff
+        diff = get_kev_diff()
+        new_entries = diff.get("new_entries", [])
+        if new_entries:
+            _kl.warning(
+                "KEV ALERT: %d new CVEs added to CISA KEV: %s",
+                len(new_entries), new_entries[:10]
+            )
+        else:
+            _kl.info("KEV check: no new entries (total: %d)", diff.get("total_current", 0))
+    except Exception as exc:
+        _log.getLogger("penteia.kev").error("KEV check job failed: %s", exc)
 
 
 @app.get("/api/schedule")
