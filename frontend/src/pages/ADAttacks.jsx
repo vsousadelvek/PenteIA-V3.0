@@ -7,6 +7,8 @@ import {
 import { useNavigate } from 'react-router-dom'
 import { useToast } from '../components/Toast'
 import api from '../api'
+import { ReactFlow, Background, Controls, Handle, Position } from '@xyflow/react'
+import '@xyflow/react/dist/style.css'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -1027,6 +1029,159 @@ function AttackPathCard({ path }) {
 }
 
 // ---------------------------------------------------------------------------
+// Tab 3 — Attack Graph (React Flow)
+// ---------------------------------------------------------------------------
+
+function AttackGraphTab() {
+  const [graph, setGraph] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+  const [dcHost, setDcHost] = useState('')
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [domain, setDomain] = useState('')
+  const [showCreds, setShowCreds] = useState(false)
+
+  const loadGraph = useCallback((opts = {}) => {
+    setLoading(true)
+    setError(null)
+    const params = new URLSearchParams()
+    if (opts.dc_host) params.set('dc_host', opts.dc_host)
+    if (opts.username) params.set('username', opts.username)
+    if (opts.password) params.set('password', opts.password)
+    if (opts.domain) params.set('domain', opts.domain)
+    const qs = params.toString() ? '?' + params.toString() : ''
+    api.get('/api/ad/attack-graph' + qs)
+      .then(res => setGraph(res.data))
+      .catch(err => setError(err.response?.data?.detail || 'Erro ao carregar grafo'))
+      .finally(() => setLoading(false))
+  }, [])
+
+  useEffect(() => { loadGraph() }, [loadGraph])
+
+  if (loading) return (
+    <div className="flex items-center justify-center h-96">
+      <Loader className="w-8 h-8 text-red-400 animate-spin" />
+    </div>
+  )
+
+  if (error) return (
+    <div className="card-dark p-8 text-center">
+      <AlertTriangle className="w-10 h-10 text-red-400 mx-auto mb-3" />
+      <p className="text-red-400">{error}</p>
+    </div>
+  )
+
+  const isDemo = graph?.data_source === 'demo'
+  const summary = graph?.summary || {}
+
+  return (
+    <div className="space-y-4">
+      {/* Demo notice + credentials */}
+      <div className="rounded-xl border border-dark-500 bg-dark-800 p-4">
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div className="flex items-center gap-2">
+            {isDemo
+              ? <Info className="w-4 h-4 text-blue-400 flex-shrink-0" />
+              : <CheckCircle className="w-4 h-4 text-green-400 flex-shrink-0" />
+            }
+            <span className="text-sm text-gray-300">
+              {isDemo
+                ? 'Grafo demonstrativo — configure credenciais AD para dados reais via LDAP'
+                : 'Grafo com dados reais do LDAP'}
+            </span>
+          </div>
+          <button
+            onClick={() => setShowCreds(v => !v)}
+            className="text-xs px-3 py-1.5 rounded-lg bg-dark-700 border border-dark-500 text-gray-400 hover:text-gray-200 flex items-center gap-1.5"
+          >
+            <Key className="w-3.5 h-3.5" />
+            {showCreds ? 'Ocultar credenciais' : 'Configurar AD'}
+          </button>
+        </div>
+
+        {showCreds && (
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            <input
+              className="col-span-2 bg-dark-700 border border-dark-500 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-600"
+              placeholder="DC hostname ou IP (ex: dc01.corp.local)"
+              value={dcHost} onChange={e => setDcHost(e.target.value)}
+            />
+            <input
+              className="bg-dark-700 border border-dark-500 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-600"
+              placeholder="Usuário (ex: corp\admin)"
+              value={username} onChange={e => setUsername(e.target.value)}
+            />
+            <input
+              type="password"
+              className="bg-dark-700 border border-dark-500 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-600"
+              placeholder="Senha"
+              value={password} onChange={e => setPassword(e.target.value)}
+            />
+            <input
+              className="bg-dark-700 border border-dark-500 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-600"
+              placeholder="Domínio (ex: corp.local)"
+              value={domain} onChange={e => setDomain(e.target.value)}
+            />
+            <button
+              onClick={() => loadGraph({ dc_host: dcHost, username, password, domain })}
+              className="px-4 py-2 rounded-lg bg-red-700 hover:bg-red-600 text-white text-sm font-semibold flex items-center gap-2"
+            >
+              <Play className="w-4 h-4" /> Enumerar via LDAP
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Summary cards */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        {[
+          { label: 'Risk Score', value: summary.risk_score + '/100', color: summary.risk_score >= 70 ? 'text-red-400' : summary.risk_score >= 40 ? 'text-orange-400' : 'text-green-400' },
+          { label: 'Kerberoastable', value: summary.kerberoastable_accounts, color: 'text-red-400' },
+          { label: 'AS-REP Roastable', value: summary.asrep_roastable, color: 'text-orange-400' },
+          { label: 'Delegation Irrestrita', value: summary.unconstrained_delegation_hosts, color: 'text-yellow-400' },
+        ].map(card => (
+          <div key={card.label} className="card-dark p-3 text-center">
+            <div className={'text-2xl font-bold ' + card.color}>{card.value}</div>
+            <div className="text-xs text-gray-500 mt-1">{card.label}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Critical findings */}
+      {summary.critical_findings?.length > 0 && (
+        <div className="rounded-xl border border-red-800/50 bg-red-950/20 p-4">
+          <p className="text-xs font-bold text-red-400 mb-2 uppercase tracking-wide">Achados Críticos</p>
+          <ul className="space-y-1">
+            {summary.critical_findings.map((f, i) => (
+              <li key={i} className="flex items-center gap-2 text-sm text-red-300">
+                <XCircle className="w-4 h-4 text-red-500 flex-shrink-0" /> {f}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* React Flow graph */}
+      <div className="rounded-xl border border-dark-500 overflow-hidden" style={{ height: 480 }}>
+        <ReactFlow
+          nodes={graph?.nodes || []}
+          edges={graph?.edges || []}
+          fitView
+          nodesDraggable={true}
+          nodesConnectable={false}
+          elementsSelectable={true}
+          colorMode="dark"
+        >
+          <Background color="#374151" gap={20} />
+          <Controls />
+        </ReactFlow>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Tab 2 — Attack Paths
 // ---------------------------------------------------------------------------
 
@@ -1159,6 +1314,7 @@ export default function ADAttacks() {
   const TABS = [
     { id: 'techniques', label: 'Técnicas AD', icon: Shield },
     { id: 'paths', label: 'Caminhos até Domain Admin', icon: GitBranch },
+    { id: 'graph', label: 'Grafo de Ataque', icon: Target },
   ]
 
   return (
@@ -1215,6 +1371,7 @@ export default function ADAttacks() {
       <div>
         {activeTab === 'techniques' && <ADTechniquesTab />}
         {activeTab === 'paths' && <AttackPathsTab />}
+        {activeTab === 'graph' && <AttackGraphTab />}
       </div>
     </div>
   )
