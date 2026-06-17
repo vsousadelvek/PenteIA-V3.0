@@ -198,13 +198,169 @@ def _technique_execution(target: str, mode: str) -> dict:
     return evidence
 
 
+def _technique_account_discovery(target: str, mode: str) -> dict:
+    """T1087 — Account Discovery: enumera usuários e grupos reais."""
+    evidence = {"technique": "T1087", "users": [], "groups": [], "artifacts": []}
+    if WINDOWS:
+        r_users = _exec_safe(["net", "user"])
+        r_groups = _exec_safe(["net", "localgroup"])
+        r_admins = _exec_safe(["net", "localgroup", "Administrators"])
+        evidence["users"] = [l.strip() for l in r_users["stdout"].splitlines() if l.strip() and "---" not in l and "command" not in l.lower()][:30]
+        evidence["groups"] = [l.strip() for l in r_groups["stdout"].splitlines() if l.strip() and "---" not in l and "*" in l][:20]
+        evidence["admin_members"] = r_admins["stdout"].strip().splitlines()[:15]
+    else:
+        r = _exec_safe(["awk", "-F:", "{print $1}", "/etc/passwd"])
+        evidence["users"] = r["stdout"].strip().splitlines()[:30]
+        r_g = _exec_safe(["awk", "-F:", "{print $1}", "/etc/group"])
+        evidence["groups"] = r_g["stdout"].strip().splitlines()[:20]
+    evidence["artifacts"].append({
+        "type": "account_enumeration",
+        "description": f"Enumerated {len(evidence['users'])} local users, {len(evidence['groups'])} groups",
+        "risk": "Account enumeration enables targeted credential attacks and privilege escalation planning",
+    })
+    return evidence
+
+
+def _technique_network_config(target: str, mode: str) -> dict:
+    """T1016 — System Network Configuration Discovery: IP, rotas, DNS."""
+    evidence = {"technique": "T1016", "interfaces": [], "dns": [], "routes": [], "artifacts": []}
+    if WINDOWS:
+        r_ip = _exec_safe(["ipconfig", "/all"])
+        r_route = _exec_safe(["route", "print"])
+        r_dns = _exec_safe(["ipconfig", "/displaydns"])
+        evidence["interfaces"] = r_ip["stdout"].strip().splitlines()[:40]
+        evidence["routes"] = r_route["stdout"].strip().splitlines()[:30]
+        evidence["dns_cache_lines"] = len(r_dns["stdout"].splitlines())
+    else:
+        r_ip = _exec_safe(["ip", "addr"])
+        r_route = _exec_safe(["ip", "route"])
+        evidence["interfaces"] = r_ip["stdout"].strip().splitlines()[:40]
+        evidence["routes"] = r_route["stdout"].strip().splitlines()[:20]
+    evidence["artifacts"].append({
+        "type": "network_map",
+        "description": "Network interfaces, routing table and DNS cache enumerated",
+        "risk": "Network topology enables lateral movement path planning",
+    })
+    return evidence
+
+
+def _technique_file_discovery(target: str, mode: str) -> dict:
+    """T1083 — File and Directory Discovery: varre diretórios sensíveis."""
+    evidence = {"technique": "T1083", "sensitive_paths": [], "findings": [], "artifacts": []}
+    if WINDOWS:
+        paths_to_check = [
+            os.path.expandvars(r"%USERPROFILE%\Documents"),
+            os.path.expandvars(r"%USERPROFILE%\Desktop"),
+            os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Recent"),
+            r"C:\Users",
+            os.path.expandvars(r"%TEMP%"),
+        ]
+        sensitive_exts = {".kdbx", ".pfx", ".p12", ".key", ".pem", ".ovpn", ".rdp", ".vnc"}
+        for path in paths_to_check:
+            if os.path.exists(path):
+                try:
+                    entries = list(os.scandir(path))[:50]
+                    hits = [e.name for e in entries if Path(e.name).suffix.lower() in sensitive_exts]
+                    evidence["sensitive_paths"].append({"path": path, "entries": len(entries), "sensitive_files": hits})
+                    if hits:
+                        evidence["findings"].extend([f"{path}\\{h}" for h in hits])
+                except PermissionError:
+                    evidence["sensitive_paths"].append({"path": path, "entries": 0, "error": "access_denied"})
+    else:
+        for path in [os.path.expanduser("~"), "/tmp", "/var/log"]:
+            if os.path.exists(path):
+                entries = os.listdir(path)[:50]
+                evidence["sensitive_paths"].append({"path": path, "entries": len(entries)})
+    evidence["artifacts"].append({
+        "type": "file_discovery",
+        "description": f"Scanned {len(evidence['sensitive_paths'])} directories, {len(evidence['findings'])} sensitive files found",
+        "risk": "Sensitive files (keys, certs, VPN configs) enable credential theft and lateral movement",
+    })
+    return evidence
+
+
+def _technique_indicator_removal(target: str, mode: str) -> dict:
+    """T1070 — Indicator Removal: cria e deleta arquivo de teste para validar EDR coverage."""
+    evidence = {"technique": "T1070", "artifacts": [], "edr_test": {}}
+    tmp_dir = tempfile.gettempdir()
+    test_filename = f"penteia_edr_test_{int(time.time())}.tmp"
+    test_path = os.path.join(tmp_dir, test_filename)
+
+    phases = []
+    try:
+        # Phase 1: create file with suspicious-looking content
+        with open(test_path, "w") as f:
+            f.write("PENTEIA_EDR_VALIDATION\nInvokeExpression\nMimikatz\nSECRET_KEY\n")
+        phases.append({"phase": "create", "status": "success", "path": test_path})
+
+        # Phase 2: read it back (simulates attacker reading dropped tool)
+        with open(test_path, "r") as f:
+            content_len = len(f.read())
+        phases.append({"phase": "read", "status": "success", "bytes": content_len})
+
+        # Phase 3: delete (indicator removal)
+        os.remove(test_path)
+        phases.append({"phase": "delete", "status": "success"})
+
+        evidence["edr_test"] = {
+            "file_written": test_filename,
+            "suspicious_strings": ["InvokeExpression", "Mimikatz", "SECRET_KEY"],
+            "edr_should_alert": True,
+            "note": "If EDR did NOT alert on this file, detection gap confirmed",
+        }
+    except Exception as e:
+        phases.append({"phase": "error", "error": str(e)})
+
+    evidence["phases"] = phases
+    evidence["artifacts"].append({
+        "type": "edr_validation",
+        "description": f"Created/deleted {test_filename} with suspicious strings to test EDR write-detection",
+        "risk": "If not alerted: EDR has file write detection gap — real malware staging would go undetected",
+    })
+    return evidence
+
+
+def _technique_ingress_transfer(target: str, mode: str) -> dict:
+    """T1105 — Ingress Tool Transfer: testa se agente consegue buscar conteúdo externo."""
+    import urllib.request
+    evidence = {"technique": "T1105", "connectivity": {}, "artifacts": []}
+
+    test_urls = [
+        ("PenteIA C2 test", "https://ifconfig.me/ip"),
+        ("CISA KEV feed", "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"),
+        ("Raw github", "https://raw.githubusercontent.com/swisskyrepo/PayloadsAllTheThings/master/README.md"),
+    ]
+
+    for label, url in test_urls:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "curl/7.88.1"})
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                size = len(resp.read(2048))
+                evidence["connectivity"][label] = {"url": url, "reachable": True, "bytes_fetched": size, "status": resp.status}
+        except Exception as e:
+            evidence["connectivity"][label] = {"url": url, "reachable": False, "error": str(e)[:80]}
+
+    reachable = sum(1 for v in evidence["connectivity"].values() if v.get("reachable"))
+    evidence["artifacts"].append({
+        "type": "external_connectivity",
+        "description": f"Agent can reach {reachable}/{len(test_urls)} external URLs",
+        "risk": f"{'HIGH — agent can download external tools/payloads' if reachable > 0 else 'LOW — egress blocked'}",
+    })
+    return evidence
+
+
 TECHNIQUE_HANDLERS = {
     "T1003": _technique_credential_access,
-    "T1082": _technique_discovery,
-    "T1547": _technique_persistence,
+    "T1016": _technique_network_config,
     "T1021": _technique_lateral_movement,
     "T1041": _technique_exfiltration,
     "T1059": _technique_execution,
+    "T1070": _technique_indicator_removal,
+    "T1082": _technique_discovery,
+    "T1083": _technique_file_discovery,
+    "T1087": _technique_account_discovery,
+    "T1105": _technique_ingress_transfer,
+    "T1547": _technique_persistence,
 }
 
 
