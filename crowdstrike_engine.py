@@ -288,22 +288,41 @@ class CrowdStrikeClient:
         except Exception:
             raw_detections = []
 
-        # Build lookup: technique_id (upper) → (technique_name, detection_id)
+        # Build lookup: canonical technique_id → (technique_name, detection_id)
+        # Canonical = uppercase, WITH dots preserved (e.g. "T1003.006")
         falcon_map: dict[str, tuple[str, str]] = {}
         for det in raw_detections:
-            tid = (det.get("technique_id") or "").upper()
-            if tid:
-                # Keep the first detection_id found for each technique
-                if tid not in falcon_map:
-                    falcon_map[tid] = (det.get("technique", ""), det.get("id", ""))
+            raw_tid = (det.get("technique_id") or "").upper().strip()
+            if raw_tid:
+                if raw_tid not in falcon_map:
+                    falcon_map[raw_tid] = (det.get("technique", ""), det.get("id", ""))
+
+        def _cs_match(sim_tid: str) -> tuple[bool, str, str]:
+            """
+            Hierarchical matching: exact → parent → child.
+            T1003.006 simulated → detects T1003.006 or T1003 (parent) or any T1003.x (child).
+            Returns (matched, technique_name, detection_id).
+            """
+            tid = sim_tid.upper().strip()
+            # 1. Exact match
+            if tid in falcon_map:
+                return True, *falcon_map[tid]
+            # 2. Parent match — strip sub-technique (.NNN)
+            parent = tid.split(".")[0]
+            if parent in falcon_map:
+                return True, *falcon_map[parent]
+            # 3. Child match — sim has parent, CS detected a child
+            for cs_tid, (cs_name, cs_id) in falcon_map.items():
+                if cs_tid.startswith(parent + "."):
+                    return True, cs_name, cs_id
+            return False, "", ""
 
         detected: list[dict] = []
         not_detected: list[dict] = []
 
         for technique_id in simulation_techniques:
-            tid_upper = technique_id.upper()
-            if tid_upper in falcon_map:
-                technique_name, detection_id = falcon_map[tid_upper]
+            matched, technique_name, detection_id = _cs_match(technique_id)
+            if matched:
                 detected.append(
                     {
                         "technique_id": technique_id,

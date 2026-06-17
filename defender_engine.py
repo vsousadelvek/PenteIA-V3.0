@@ -75,21 +75,38 @@ class DefenderClient:
 
     def correlate_with_simulation(self, simulation_techniques: list, hours_back: int = 24) -> dict:
         alerts = self.get_alerts(hours_back)
-        alert_mitre_ids = set()
+
+        # Build canonical lookup: uppercase WITH dots (e.g. "T1003.006")
+        alert_technique_map: dict[str, str] = {}  # tid → alert_id
         alert_names_text = ""
         for alert in alerts:
+            alert_id = alert.get("id", "")
             for technique in alert.get("mitreTechniques", []):
-                alert_mitre_ids.add(technique.replace(".", ""))
+                canonical = technique.upper().strip()
+                if canonical and canonical not in alert_technique_map:
+                    alert_technique_map[canonical] = alert_id
             alert_names_text += " " + alert.get("title", "").lower()
+
+        def _defender_match(sim_tid: str) -> bool:
+            """Hierarchical matching — exact, parent, child, keyword."""
+            tid = sim_tid.upper().strip()
+            if tid in alert_technique_map:
+                return True
+            parent = tid.split(".")[0]
+            if parent in alert_technique_map:
+                return True
+            for cs_tid in alert_technique_map:
+                if cs_tid.startswith(parent + "."):
+                    return True
+            return False
 
         results = []
         detected_count = 0
         for tech in simulation_techniques:
-            tid = tech.get("id", "").replace(".", "")
+            tid = tech.get("id", "")
             name = tech.get("name", "").lower()
-            detected = (
-                tid in alert_mitre_ids or
-                any(word in alert_names_text for word in name.split()[:2] if len(word) > 4)
+            detected = _defender_match(tid) or any(
+                word in alert_names_text for word in name.split()[:2] if len(word) > 4
             )
             if detected:
                 detected_count += 1

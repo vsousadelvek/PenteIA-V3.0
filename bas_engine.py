@@ -462,54 +462,236 @@ class Playbook:
         return by_tactic
 
 
+def _empty_artifacts() -> dict:
+    return {'files_created': [], 'registry_modified': [], 'processes_spawned': [], 'network_connections': []}
+
+
 class TechniqueExecutor:
-    """Executa técnicas individuais do MITRE ATT&CK"""
+    """Executa técnicas MITRE ATT&CK — usa execution_engine para handlers reais."""
+
+    # Técnicas que têm handler real no execution_engine
+    _REAL_HANDLERS = {
+        'T1003', 'T1016', 'T1021', 'T1021.001', 'T1021.002', 'T1021.004',
+        'T1033', 'T1041', 'T1049', 'T1057', 'T1059', 'T1059.001', 'T1059.003',
+        'T1059.004', 'T1070', 'T1070.004', 'T1082', 'T1083', 'T1087',
+        'T1087.001', 'T1105', 'T1107', 'T1012', 'T1518', 'T1547', 'T1547.001',
+        'T1007', 'T1552', 'T1552.001', 'T1113',
+    }
+
+    # Técnicas destrutivas — nunca executar; apenas documentar e observar indicadores
+    _DESTRUCTIVE = {
+        'T1486', 'T1485', 'T1490', 'T1561', 'T1529', 'T1070.001', 'T1562.008',
+        'T1055', 'T1055.001', 'T1055.012', 'T1134', 'T1003.001',
+    }
 
     def __init__(self):
         self.executions = []
+        self._eng = None
+
+    def _get_engine(self):
+        if self._eng is None:
+            try:
+                import execution_engine
+                self._eng = execution_engine
+            except ImportError:
+                self._eng = False
+        return self._eng if self._eng else None
 
     def execute(self, technique: MITRETechnique) -> dict:
-        """Executa técnica e coleta evidências"""
         execution_id = str(uuid.uuid4())
-        success = self._simulate_execution(technique)
+        tid = technique.technique_id
 
-        execution_result = {
+        # ── Rota 1: handler real no execution_engine ──────────────────────────
+        eng = self._get_engine()
+        if eng and tid in eng.TECHNIQUE_HANDLERS:
+            try:
+                raw = eng.execute_technique(tid, 'localhost', 'safe')
+                ev_data = raw.get('technique_evidence', {})
+                evidence = self._extract_evidence_from_raw(ev_data, technique)
+                artifacts = self._extract_artifacts_from_raw(ev_data)
+                success = raw.get('status') == 'completed'
+                exec_type = 'real'
+            except Exception as e:
+                evidence = [f'Handler error: {e}']
+                artifacts = _empty_artifacts()
+                success = False
+                exec_type = 'error'
+
+        # ── Rota 2: handler aproximado por prefixo ────────────────────────────
+        elif eng:
+            base_id = tid.split('.')[0]
+            if base_id in eng.TECHNIQUE_HANDLERS:
+                try:
+                    raw = eng.execute_technique(base_id, 'localhost', 'safe')
+                    ev_data = raw.get('technique_evidence', {})
+                    evidence = self._extract_evidence_from_raw(ev_data, technique)
+                    artifacts = self._extract_artifacts_from_raw(ev_data)
+                    success = True
+                    exec_type = 'real_parent'
+                except Exception:
+                    evidence = self._collect_evidence_safe(technique)
+                    artifacts = _empty_artifacts()
+                    success = True
+                    exec_type = 'safe_simulation'
+            else:
+                evidence = self._collect_evidence_safe(technique)
+                artifacts = _empty_artifacts()
+                success = True
+                exec_type = 'safe_simulation'
+        else:
+            evidence = self._collect_evidence_safe(technique)
+            artifacts = _empty_artifacts()
+            success = True
+            exec_type = 'safe_simulation'
+
+        # Técnicas destrutivas nunca marcadas como success real
+        if tid in self._DESTRUCTIVE:
+            exec_type = 'safe_simulation'
+            evidence = self._collect_destructive_indicators(technique)
+
+        result = {
             'execution_id': execution_id,
-            'technique_id': technique.technique_id,
+            'technique_id': tid,
             'technique_name': technique.name,
             'tactic': technique.tactic.name,
             'executed_at': datetime.now().isoformat(),
             'success': success,
             'severity': technique.severity,
-            'evidence': self._collect_evidence(technique),
-            'artifacts': self._collect_artifacts(technique),
-            'detection_status': 'undetected' if success else 'detected',
+            'evidence': evidence,
+            'artifacts': artifacts,
+            'execution_type': exec_type,
+            'detection_status': 'executed' if exec_type.startswith('real') else 'simulated',
         }
+        self.executions.append(result)
+        return result
 
-        self.executions.append(execution_result)
-        return execution_result
+    # ── Extratores de evidência ───────────────────────────────────────────────
 
-    def _simulate_execution(self, technique: MITRETechnique) -> bool:
-        return True
+    def _extract_evidence_from_raw(self, ev: dict, technique: MITRETechnique) -> list:
+        out = []
+        tid = technique.technique_id
 
-    def _collect_evidence(self, technique: MITRETechnique) -> List[str]:
-        evidence_map = {
-            'T1021.001': ['RDP connection logs', 'netstat output', 'process creation events'],
-            'T1047': ['WMI event logs', 'command execution logs', 'registry modifications'],
-            'T1110.001': ['Failed login attempts', 'brute force detections', 'account lockouts'],
-            'T1003.001': ['LSASS dump artifact', 'minidump file created', 'Credential Guard status'],
-            'T1486': ['Encrypted file extensions changed', 'ransom note dropped', 'shadow copies deleted'],
-            'T1562.001': ['Windows Defender service stopped', 'registry tamper detected'],
+        if 'users' in ev:
+            out.append(f"Usuários encontrados: {', '.join(str(u) for u in ev['users'][:5])}")
+        if 'groups' in ev:
+            out.append(f"Grupos: {len(ev['groups'])} grupos locais enumerados")
+        if 'admin_members' in ev:
+            out.append(f"Membros do grupo Administrators: {len(ev['admin_members'])} entradas")
+        if 'shells_available' in ev:
+            shells = [s['name'] for s in ev.get('shells_available', []) if s.get('available')]
+            out.append(f"Shells disponíveis: {', '.join(shells) or 'nenhum'}")
+        if 'system_info' in ev:
+            si = ev['system_info']
+            out.append(f"Sistema: {si.get('hostname','?')} | OS: {si.get('os','?')} {si.get('os_version','')[:40]}")
+        if 'processes_snapshot' in ev:
+            out.append(f"Processos capturados: {len(ev['processes_snapshot'])} entradas")
+        if 'security_tools_detected' in ev:
+            tools = ev['security_tools_detected']
+            out.append(f"Ferramentas de segurança detectadas: {', '.join(tools) or 'nenhuma'}")
+        if 'autostart_locations' in ev:
+            total = sum(len(loc.get('entries', [])) for loc in ev['autostart_locations'])
+            out.append(f"Chaves de autostart no registro: {total} entradas")
+        if 'connectivity' in ev:
+            for svc, v in ev['connectivity'].items():
+                status = 'ABERTA' if v.get('open') or v.get('reachable') else 'FECHADA'
+                out.append(f"Porta {svc}: {status}")
+        if 'interfaces' in ev:
+            out.append(f"Interfaces de rede: {len(ev['interfaces'])} linhas coletadas")
+        if 'sensitive_paths' in ev:
+            total_sensitive = sum(len(p.get('sensitive_files', [])) for p in ev['sensitive_paths'])
+            out.append(f"Arquivos sensíveis (.kdbx/.pfx/.pem/.ovpn): {total_sensitive} encontrados")
+        if 'phases' in ev:
+            for ph in ev['phases']:
+                out.append(f"Fase {ph.get('phase','?')}: {ph.get('status', ph.get('error','?'))}")
+        if 'edr_test' in ev:
+            out.append(f"Arquivo de teste EDR: {ev['edr_test'].get('file_written','?')} — EDR deveria alertar: {ev['edr_test'].get('edr_should_alert')}")
+        for label, v in ev.get('connectivity', {}).items() if isinstance(ev.get('connectivity'), dict) else []:
+            reach = v.get('reachable', v.get('open', False))
+            out.append(f"{label}: {'alcançável' if reach else 'bloqueado'}")
+        if 'services' in ev:
+            out.append(f"Serviços do sistema: {len(ev['services'])} enumerados")
+        if 'software' in ev:
+            out.append(f"Softwares instalados: {len(ev['software'])} encontrados")
+        if 'credential_files' in ev:
+            found = ev['credential_files']
+            out.append(f"Arquivos de credenciais localizados: {len(found)} ({', '.join(str(f) for f in found[:3])})")
+        if 'registry_keys' in ev:
+            out.append(f"Chaves de registro com credenciais: {len(ev['registry_keys'])} verificadas")
+        if 'current_user' in ev:
+            out.append(f"Usuário atual: {ev['current_user']}")
+
+        if not out:
+            for key, val in ev.items():
+                if key == 'technique':
+                    continue
+                if isinstance(val, list) and val:
+                    out.append(f"{key}: {len(val)} itens")
+                elif isinstance(val, str) and val:
+                    out.append(f"{key}: {val[:120]}")
+        return out or [f'Técnica {technique.technique_id} executada — sem output estruturado']
+
+    def _extract_artifacts_from_raw(self, ev: dict) -> dict:
+        artifacts = _empty_artifacts()
+        if 'phases' in ev:
+            for ph in ev['phases']:
+                if ph.get('phase') == 'create' and ph.get('path'):
+                    artifacts['files_created'].append(ph['path'])
+        if 'autostart_locations' in ev:
+            for loc in ev['autostart_locations']:
+                if loc.get('key'):
+                    artifacts['registry_modified'].append(loc['key'])
+        return artifacts
+
+    def _collect_evidence_safe(self, technique: MITRETechnique) -> list:
+        tid = technique.technique_id
+        # Safe observation sem handler dedicado
+        safe_map = {
+            'T1566': ['Email delivery mechanism observado; sem execução de payload'],
+            'T1566.001': ['Anexo malicioso simulado; execução bloqueada para segurança'],
+            'T1195': ['Supply chain compromise simulado; requer acesso ao repositório de software'],
+            'T1110.001': ['Password guessing: verificação de lockout policy'],
+            'T1110.003': ['Password spraying: verificação de threshold de lockout'],
+            'T1187': ['LLMNR poisoning: requer posição de rede local (ARP)'],
+            'T1040': ['Network sniffing: requer interface em modo promíscuo'],
+            'T1558': ['Kerberos ticket attack: requer acesso ao KDC'],
+            'T1558.003': ['Kerberoasting: SPN enumeration requer credencial de domínio'],
+            'T1550': ['Pass-the-Hash: requer hash NTLM capturado previamente'],
+            'T1021.001': ['RDP connectivity: testado via TCP port 3389'],
+            'T1021.002': ['SMB Admin Shares: testado via TCP port 445'],
+            'T1021.004': ['SSH: testado via TCP port 22'],
         }
-        return evidence_map.get(technique.technique_id, ['Generic evidence collected'])
+        evidence = safe_map.get(tid, [])
+        if not evidence:
+            base = tid.split('.')[0]
+            evidence = safe_map.get(base, [f'Técnica {tid} — {technique.name}: observação segura registrada'])
+        return evidence
 
-    def _collect_artifacts(self, technique: MITRETechnique) -> dict:
-        return {
-            'files_created': [],
-            'registry_modified': [],
-            'processes_spawned': [],
-            'network_connections': [],
-        }
+    def _collect_destructive_indicators(self, technique: MITRETechnique) -> list:
+        """Para técnicas destrutivas: coleta indicadores de vulnerabilidade sem executar."""
+        import subprocess, platform
+        evidence = [f'[SAFE MODE] Técnica destrutiva {technique.technique_id} — execução bloqueada para segurança']
+        try:
+            if platform.system() == 'Windows':
+                # Verifica se shadow copies existem (indicador de risco para T1490)
+                if technique.technique_id in ('T1490', 'T1486'):
+                    r = subprocess.run(['vssadmin', 'list', 'shadows'], capture_output=True, text=True, timeout=5,
+                                       creationflags=subprocess.CREATE_NO_WINDOW)
+                    if 'No items found' in r.stdout:
+                        evidence.append('Shadow copies: NENHUMA — sistema vulnerável a ransomware sem recovery point')
+                    else:
+                        lines = [l for l in r.stdout.splitlines() if 'Shadow Copy' in l]
+                        evidence.append(f'Shadow copies existentes: {len(lines)} — {("recovery possível" if lines else "verificar")}')
+                # Verifica se LSASS tem PPL habilitado (T1003.001)
+                if technique.technique_id == 'T1003.001':
+                    r = subprocess.run(['reg', 'query', r'HKLM\SYSTEM\CurrentControlSet\Control\Lsa', '/v', 'RunAsPPL'],
+                                       capture_output=True, text=True, timeout=5, creationflags=subprocess.CREATE_NO_WINDOW)
+                    if '0x1' in r.stdout:
+                        evidence.append('LSASS PPL: HABILITADO — proteção contra dump ativa')
+                    else:
+                        evidence.append('LSASS PPL: DESABILITADO — dump de credenciais possível')
+        except Exception:
+            pass
+        return evidence
 
 
 class SeverityScorer:

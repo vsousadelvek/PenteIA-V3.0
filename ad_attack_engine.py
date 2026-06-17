@@ -321,31 +321,61 @@ ATTACK_PATHS_TO_DA = [
 
 # ── Simulation ────────────────────────────────────────────────────────────────
 
-def simulate_ad_technique(technique_id: str, target_domain: str, target_dc: str = "") -> dict:
-    """Simulate an AD attack technique and return findings."""
+def simulate_ad_technique(technique_id: str, target_domain: str, target_dc: str = "",
+                           username: str = "", password: str = "") -> dict:
+    """
+    Executa ou simula uma técnica AD.
+    Com credenciais e DC: executa enumeração LDAP real (read-only).
+    Sem credenciais: retorna metadados + documentação.
+    """
     tech = next((t for t in AD_TECHNIQUES if t["id"] == technique_id), None)
     if not tech:
-        raise ValueError(f"Technique {technique_id} not found in AD catalog")
+        raise ValueError(f"Technique {technique_id} not found")
 
+    # Com credenciais e DC — tenta execução real
+    if target_dc and username and password and target_domain:
+        if technique_id == "T1558.003":
+            result = enumerate_spns(target_dc, username, password, target_domain)
+        elif technique_id == "T1558.004":
+            result = enumerate_asrep_users(target_dc, username, password, target_domain)
+        elif technique_id in ("T1087", "T1087.002"):
+            result = enumerate_domain_users(target_dc, username, password, target_domain)
+        elif technique_id in ("T1078", "T1078.002"):
+            result = enumerate_unconstrained_delegation(target_dc, username, password, target_domain)
+        else:
+            result = {"status": "simulated"}
+
+        if result.get("status") not in ("ldap_unavailable", "error", "simulated"):
+            result.update({
+                "technique_id": technique_id,
+                "technique_name": tech["name"],
+                "tactic": tech["tactic"],
+                "severity": tech["severity"],
+                "cvss_score": tech.get("cvss_like_score", 7.5),
+                "kill_chain": tech.get("kill_chain", []),
+                "mitigations": tech.get("mitigations", []),
+                "detection": tech.get("detection", []),
+                "tools": tech.get("tools", []),
+            })
+            return result
+
+    # Sem credenciais ou DC inacessível — modo documentação
     return {
         "technique_id": technique_id,
         "technique_name": tech["name"],
         "tactic": tech["tactic"],
         "severity": tech["severity"],
-        "target_domain": target_domain,
-        "target_dc": target_dc,
-        "status": "simulated",
-        "kill_chain": tech["kill_chain"],
-        "tools": tech["tools"],
-        "mitigations": tech["mitigations"],
-        "detection": tech["detection"],
-        "cvss_like_score": tech["cvss_like_score"],
-        "br_context": tech.get("br_context", ""),
+        "status": "documented",
+        "note": "Forneça target_dc, username e password para enumeração LDAP real (read-only).",
         "findings": [
-            f"[SIMULADO] {tech['name']} executado contra domínio {target_domain}",
-            f"Impacto potencial: {tech['impact']}",
-            f"Pré-requisitos necessários: {', '.join(tech['prerequisites'])}",
+            f"[DOC] {tech['name']}: {tech['description'][:200]}",
+            f"Impacto potencial: {tech.get('impact', 'N/A')}",
         ],
+        "kill_chain": tech.get("kill_chain", []),
+        "mitigations": tech.get("mitigations", []),
+        "detection": tech.get("detection", []),
+        "tools": tech.get("tools", []),
+        "cvss_score": tech.get("cvss_like_score", 7.5),
     }
 
 
@@ -407,3 +437,241 @@ def list_attack_paths() -> list:
 
 def get_attack_path(path_id: str) -> Optional[dict]:
     return next((p for p in ATTACK_PATHS_TO_DA if p["path_id"] == path_id), None)
+
+
+# ── LDAP Real Enumeration ────────────────────────────────────────────────────
+
+def _ldap_connect(dc_host: str, username: str, password: str, domain: str) -> object:
+    """Conecta ao AD via LDAP usando ldap3. Retorna connection ou None."""
+    try:
+        import ldap3  # type: ignore[import-not-found]
+        server = ldap3.Server(dc_host, get_info=ldap3.ALL, connect_timeout=5)
+        user_dn = f"{domain}\\{username}" if domain else username
+        conn = ldap3.Connection(
+            server, user=user_dn, password=password,
+            authentication=ldap3.NTLM, auto_bind=True,
+        )
+        return conn
+    except ImportError:
+        return None
+    except Exception:
+        return None
+
+
+def enumerate_spns(dc_host: str, username: str, password: str, domain: str) -> dict:
+    """
+    T1558.003 — Kerberoasting: enumera service accounts com SPN via LDAP real.
+    Read-only — não executa nenhum ataque, apenas mapeia superfície de risco.
+    """
+    conn = _ldap_connect(dc_host, username, password, domain)
+    if conn is None:
+        return {
+            "technique": "T1558.003",
+            "status": "ldap_unavailable",
+            "reason": "ldap3 não instalado ou DC inacessível. pip install ldap3",
+            "kerberoastable_accounts": [],
+            "risk_level": "unknown",
+        }
+
+    try:
+        import ldap3
+        base_dn = ",".join(f"DC={part}" for part in domain.split(".")) if "." in domain else f"DC={domain},DC=local"
+        conn.search(
+            search_base=base_dn,
+            search_filter="(&(objectClass=user)(servicePrincipalName=*)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))",
+            attributes=["sAMAccountName", "servicePrincipalName", "pwdLastSet", "adminCount"],
+        )
+        accounts = []
+        for entry in conn.entries:
+            spns = entry.servicePrincipalName.values if entry.servicePrincipalName else []
+            pwd_last_set = str(entry.pwdLastSet) if entry.pwdLastSet else "unknown"
+            is_admin = bool(entry.adminCount and str(entry.adminCount) == "1")
+            accounts.append({
+                "account": str(entry.sAMAccountName),
+                "spns": list(spns)[:5],
+                "pwd_last_set": pwd_last_set,
+                "is_privileged": is_admin,
+                "risk": "CRITICAL" if is_admin else "HIGH",
+            })
+        conn.unbind()
+        return {
+            "technique": "T1558.003",
+            "status": "real_enumeration",
+            "kerberoastable_accounts": accounts,
+            "total_found": len(accounts),
+            "privileged_accounts": sum(1 for a in accounts if a["is_privileged"]),
+            "risk_level": "critical" if any(a["is_privileged"] for a in accounts) else "high" if accounts else "low",
+            "recommendation": (
+                "Contas encontradas com SPN são alvos de Kerberoasting. "
+                "Migrar para gMSA (Group Managed Service Accounts) com senhas de 120 chars auto-rotacionadas."
+            ) if accounts else "Nenhuma conta kerberoastable encontrada.",
+        }
+    except Exception as e:
+        return {"technique": "T1558.003", "status": "error", "error": str(e), "kerberoastable_accounts": []}
+
+
+def enumerate_asrep_users(dc_host: str, username: str, password: str, domain: str) -> dict:
+    """
+    T1558.004 — AS-REP Roasting: enumera contas sem pré-autenticação Kerberos.
+    Read-only — apenas enumera, não solicita tickets.
+    """
+    conn = _ldap_connect(dc_host, username, password, domain)
+    if conn is None:
+        return {
+            "technique": "T1558.004",
+            "status": "ldap_unavailable",
+            "asrep_accounts": [],
+            "risk_level": "unknown",
+        }
+    try:
+        import ldap3
+        base_dn = ",".join(f"DC={part}" for part in domain.split(".")) if "." in domain else f"DC={domain},DC=local"
+        # UF_DONT_REQUIRE_PREAUTH = 0x400000 = 4194304
+        conn.search(
+            search_base=base_dn,
+            search_filter="(&(objectClass=user)(userAccountControl:1.2.840.113556.1.4.803:=4194304))",
+            attributes=["sAMAccountName", "userAccountControl", "pwdLastSet"],
+        )
+        accounts = [
+            {
+                "account": str(e.sAMAccountName),
+                "pwd_last_set": str(e.pwdLastSet),
+                "risk": "HIGH",
+                "note": "Pre-auth disabled — AS-REP crackable offline without credentials",
+            }
+            for e in conn.entries
+        ]
+        conn.unbind()
+        return {
+            "technique": "T1558.004",
+            "status": "real_enumeration",
+            "asrep_accounts": accounts,
+            "total_found": len(accounts),
+            "risk_level": "critical" if len(accounts) > 2 else "high" if accounts else "low",
+            "recommendation": "Habilite Kerberos pre-authentication em TODAS as contas. Audite com: Get-ADUser -Filter {DoesNotRequirePreAuth -eq $true}",
+        }
+    except Exception as e:
+        return {"technique": "T1558.004", "status": "error", "error": str(e), "asrep_accounts": []}
+
+
+def enumerate_domain_users(dc_host: str, username: str, password: str, domain: str) -> dict:
+    """
+    T1087.002 — Domain Account Discovery: enumera usuários e grupos do domínio.
+    """
+    conn = _ldap_connect(dc_host, username, password, domain)
+    if conn is None:
+        return {"technique": "T1087.002", "status": "ldap_unavailable", "users": [], "groups": []}
+    try:
+        base_dn = ",".join(f"DC={part}" for part in domain.split(".")) if "." in domain else f"DC={domain},DC=local"
+        # Usuários habilitados
+        conn.search(
+            search_base=base_dn,
+            search_filter="(&(objectClass=user)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))",
+            attributes=["sAMAccountName", "memberOf", "adminCount"],
+        )
+        users = []
+        privileged = []
+        for entry in conn.entries:
+            acc = str(entry.sAMAccountName)
+            is_priv = bool(entry.adminCount and str(entry.adminCount) == "1")
+            users.append({"account": acc, "privileged": is_priv})
+            if is_priv:
+                privileged.append(acc)
+
+        # Grupos
+        conn.search(
+            search_base=base_dn,
+            search_filter="(objectClass=group)",
+            attributes=["cn", "member"],
+        )
+        groups = [{"name": str(e.cn), "member_count": len(e.member.values) if e.member else 0}
+                  for e in conn.entries][:30]
+        conn.unbind()
+        return {
+            "technique": "T1087.002",
+            "status": "real_enumeration",
+            "total_users": len(users),
+            "privileged_users": privileged[:20],
+            "groups": groups,
+            "risk_level": "high" if privileged else "medium",
+        }
+    except Exception as e:
+        return {"technique": "T1087.002", "status": "error", "error": str(e)}
+
+
+def enumerate_unconstrained_delegation(dc_host: str, username: str, password: str, domain: str) -> dict:
+    """
+    T1078.002 — Unconstrained Delegation: busca computadores com delegação irrestrita.
+    Máximo impacto: qualquer TGT de usuário que acesse esses hosts é capturável.
+    """
+    conn = _ldap_connect(dc_host, username, password, domain)
+    if conn is None:
+        return {"technique": "T1078.002", "status": "ldap_unavailable", "vulnerable_hosts": []}
+    try:
+        base_dn = ",".join(f"DC={part}" for part in domain.split(".")) if "." in domain else f"DC={domain},DC=local"
+        # TRUSTED_FOR_DELEGATION = 0x80000 = 524288 (excluindo DCs que têm isso por padrão)
+        conn.search(
+            search_base=base_dn,
+            search_filter="(&(objectClass=computer)(userAccountControl:1.2.840.113556.1.4.803:=524288)(!(primaryGroupID=516))(!(primaryGroupID=521)))",
+            attributes=["dNSHostName", "sAMAccountName", "operatingSystem"],
+        )
+        hosts = [
+            {
+                "hostname": str(e.dNSHostName),
+                "account": str(e.sAMAccountName),
+                "os": str(e.operatingSystem),
+                "risk": "CRITICAL",
+                "note": "Unconstrained delegation — any user TGT visiting this host can be captured for impersonation",
+            }
+            for e in conn.entries
+        ]
+        conn.unbind()
+        return {
+            "technique": "T1078.002",
+            "status": "real_enumeration",
+            "vulnerable_hosts": hosts,
+            "total_found": len(hosts),
+            "risk_level": "critical" if hosts else "low",
+            "recommendation": "Remova Unconstrained Delegation e migre para Constrained ou Resource-Based Constrained Delegation.",
+        }
+    except Exception as e:
+        return {"technique": "T1078.002", "status": "error", "error": str(e)}
+
+
+def run_ad_assessment(dc_host: str, username: str, password: str, domain: str) -> dict:
+    """
+    Assessment completo do AD: roda todas as enumerações reais e retorna consolidado.
+    Todas as operações são read-only — zero modificação no AD.
+    """
+    results = {
+        "assessment_type": "AD Security Assessment — PenteIA V4.0",
+        "target_dc": dc_host,
+        "domain": domain,
+        "timestamp": __import__("datetime").datetime.utcnow().isoformat(),
+        "checks": {},
+        "critical_findings": [],
+        "risk_score": 0,
+    }
+
+    checks = [
+        ("kerberoasting", enumerate_spns),
+        ("asrep_roasting", enumerate_asrep_users),
+        ("domain_users", enumerate_domain_users),
+        ("unconstrained_delegation", enumerate_unconstrained_delegation),
+    ]
+
+    for name, fn in checks:
+        try:
+            r = fn(dc_host, username, password, domain)
+            results["checks"][name] = r
+            risk = r.get("risk_level", "unknown")
+            if risk == "critical":
+                results["risk_score"] += 30
+                results["critical_findings"].append(name)
+            elif risk == "high":
+                results["risk_score"] += 15
+        except Exception as e:
+            results["checks"][name] = {"status": "error", "error": str(e)}
+
+    results["risk_score"] = min(100, results["risk_score"])
+    return results

@@ -349,18 +349,240 @@ def _technique_ingress_transfer(target: str, mode: str) -> dict:
     return evidence
 
 
+def _technique_process_discovery(target: str, mode: str) -> dict:
+    """T1057 — Process Discovery: lista processos em execução e detecta ferramentas de segurança."""
+    evidence = {"technique": "T1057", "processes": [], "security_tools": [], "artifacts": []}
+    if WINDOWS:
+        r = _exec_safe(["tasklist", "/fo", "csv", "/nh"])
+    else:
+        r = _exec_safe(["ps", "aux", "--no-header"])
+    lines = r["stdout"].strip().splitlines()
+    evidence["processes"] = lines[:50]
+    security_keywords = ["defender", "crowdstrike", "carbon", "sentinel", "cylance",
+                         "mcafee", "symantec", "bitdefender", "kaspersky", "avast",
+                         "malwarebytes", "sophos", "eset", "wireshark", "procmon", "sysmon"]
+    found_security = [kw for kw in security_keywords if any(kw in l.lower() for l in lines)]
+    evidence["security_tools"] = found_security
+    evidence["artifacts"].append({
+        "type": "process_list",
+        "description": f"Capturou {len(lines)} processos; {len(found_security)} ferramentas de segurança detectadas: {found_security}",
+        "risk": "Process enumeration enables targeted evasion of specific EDR agents" if found_security else "No EDR detected — elevated risk",
+    })
+    return evidence
+
+
+def _technique_network_connections(target: str, mode: str) -> dict:
+    """T1049 — System Network Connections Discovery: netstat real."""
+    evidence = {"technique": "T1049", "connections": [], "listening": [], "artifacts": []}
+    if WINDOWS:
+        r = _exec_safe(["netstat", "-ano"])
+    else:
+        r = _exec_safe(["ss", "-tunap"])
+    lines = r["stdout"].strip().splitlines()
+    evidence["connections"] = lines[:40]
+    listening = [l for l in lines if "LISTEN" in l or "0.0.0.0" in l]
+    evidence["listening"] = listening[:20]
+    evidence["artifacts"].append({
+        "type": "network_state",
+        "description": f"{len(lines)} conexões; {len(listening)} portas em escuta",
+        "risk": "Open ports reveal attack surface and running services",
+    })
+    return evidence
+
+
+def _technique_service_discovery(target: str, mode: str) -> dict:
+    """T1007 — System Service Discovery: enumera serviços do sistema."""
+    evidence = {"technique": "T1007", "services": [], "vulnerable_services": [], "artifacts": []}
+    if WINDOWS:
+        r = _exec_safe(["sc", "query", "type=", "all", "state=", "all"])
+        lines = r["stdout"].strip().splitlines()
+        services = [l.strip() for l in lines if l.strip().startswith("SERVICE_NAME")]
+        evidence["services"] = [s.replace("SERVICE_NAME: ", "") for s in services[:50]]
+        risky = ["telnet", "tftp", "ftp", "rsh", "rexec", "rlogin", "rdp", "vnc", "teamviewer", "anydesk"]
+        evidence["vulnerable_services"] = [s for s in evidence["services"] if any(r in s.lower() for r in risky)]
+    else:
+        r = _exec_safe(["systemctl", "list-units", "--type=service", "--state=running", "--no-pager"])
+        lines = r["stdout"].strip().splitlines()
+        evidence["services"] = lines[:50]
+    evidence["artifacts"].append({
+        "type": "service_enumeration",
+        "description": f"{len(evidence['services'])} serviços; {len(evidence['vulnerable_services'])} potencialmente vulneráveis",
+        "risk": "Unnecessary services expand attack surface" if evidence["vulnerable_services"] else "Service inventory captured",
+    })
+    return evidence
+
+
+def _technique_system_owner(target: str, mode: str) -> dict:
+    """T1033 — System Owner/User Discovery: whoami + grupos do usuário atual."""
+    evidence = {"technique": "T1033", "current_user": "", "groups": [], "privileges": [], "artifacts": []}
+    if WINDOWS:
+        r_who = _exec_safe(["whoami"])
+        r_grp = _exec_safe(["whoami", "/groups", "/fo", "csv"])
+        r_priv = _exec_safe(["whoami", "/priv", "/fo", "csv"])
+        evidence["current_user"] = r_who["stdout"].strip()
+        evidence["groups"] = r_grp["stdout"].strip().splitlines()[:20]
+        priv_lines = r_priv["stdout"].strip().splitlines()
+        enabled = [l for l in priv_lines if "Enabled" in l]
+        evidence["privileges"] = enabled[:15]
+        is_admin = any("Admin" in l or "S-1-5-32-544" in l for l in evidence["groups"])
+        evidence["is_admin"] = is_admin
+    else:
+        r = _exec_safe(["id"])
+        evidence["current_user"] = r["stdout"].strip()
+        evidence["is_admin"] = "uid=0" in r["stdout"]
+    evidence["artifacts"].append({
+        "type": "identity_info",
+        "description": f"User: {evidence['current_user']} | Admin: {evidence.get('is_admin', False)} | Privileges: {len(evidence['privileges'])}",
+        "risk": "Admin/SYSTEM context enables privilege escalation and lateral movement",
+    })
+    return evidence
+
+
+def _technique_registry_query(target: str, mode: str) -> dict:
+    """T1012 — Query Registry: lê chaves sensíveis do registro Windows."""
+    evidence = {"technique": "T1012", "registry_keys": [], "artifacts": []}
+    if not WINDOWS:
+        evidence["artifacts"].append({"type": "n/a", "description": "Registry is Windows-only", "risk": "N/A"})
+        return evidence
+    sensitive_keys = [
+        (r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run", "Autostart"),
+        (r"HKLM\SYSTEM\CurrentControlSet\Control\Lsa", "LSA config (credential protection)"),
+        (r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon", "Winlogon (autologon creds)"),
+        (r"HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run", "User autostart"),
+        (r"HKLM\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters", "SMB config"),
+    ]
+    for key, label in sensitive_keys:
+        r = _exec_safe(["reg", "query", key], timeout=5)
+        if r["returncode"] == 0:
+            lines = [l.strip() for l in r["stdout"].splitlines() if l.strip() and not l.strip().startswith("HKEY")]
+            evidence["registry_keys"].append({"key": key, "label": label, "values": lines[:10]})
+    evidence["artifacts"].append({
+        "type": "registry_read",
+        "description": f"{len(evidence['registry_keys'])} chaves sensíveis lidas",
+        "risk": "Registry contains credentials, persistence mechanisms and security configs",
+    })
+    return evidence
+
+
+def _technique_software_discovery(target: str, mode: str) -> dict:
+    """T1518 — Software Discovery: enumera softwares instalados."""
+    evidence = {"technique": "T1518", "software": [], "vulnerable_count": 0, "artifacts": []}
+    if WINDOWS:
+        r = _exec_safe(["reg", "query",
+                        r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+                        "/s", "/v", "DisplayName"], timeout=15)
+        names = [l.split("REG_SZ")[-1].strip() for l in r["stdout"].splitlines()
+                 if "DisplayName" in l and "REG_SZ" in l]
+        evidence["software"] = names[:60]
+        risky_sw = ["teamviewer", "anydesk", "ultraviewer", "logmein", "vnc", "putty",
+                    "winscp", "filezilla", "7-zip", "winrar", "python", "node", "git"]
+        evidence["risky_installed"] = [s for s in names if any(r in s.lower() for r in risky_sw)]
+    else:
+        r = _exec_safe(["dpkg", "--list"])
+        if r["returncode"] != 0:
+            r = _exec_safe(["rpm", "-qa"])
+        evidence["software"] = r["stdout"].strip().splitlines()[:60]
+    evidence["artifacts"].append({
+        "type": "software_inventory",
+        "description": f"{len(evidence['software'])} softwares detectados",
+        "risk": "Outdated software versions expose known CVEs; remote access tools enable lateral movement",
+    })
+    return evidence
+
+
+def _technique_unsecured_credentials(target: str, mode: str) -> dict:
+    """T1552 — Unsecured Credentials: busca arquivos com credenciais em texto claro."""
+    import glob as _glob
+    evidence = {"technique": "T1552", "credential_files": [], "findings": [], "artifacts": []}
+    search_patterns = []
+    if WINDOWS:
+        home = os.path.expanduser("~")
+        search_patterns = [
+            os.path.join(home, "*.txt"),
+            os.path.join(home, "Desktop", "*.txt"),
+            os.path.join(home, "Documents", "*.txt"),
+            os.path.expandvars(r"%APPDATA%\*.ini"),
+            "C:\\inetpub\\wwwroot\\web.config",
+            "C:\\xampp\\htdocs\\.env",
+        ]
+    else:
+        home = os.path.expanduser("~")
+        search_patterns = [
+            os.path.join(home, ".bash_history"),
+            os.path.join(home, ".ssh", "id_rsa"),
+            "/etc/passwd",
+            "/var/www/html/.env",
+        ]
+
+    cred_keywords = ["password", "passwd", "secret", "apikey", "api_key", "token", "senha", "chave"]
+    for pattern in search_patterns:
+        for filepath in _glob.glob(pattern)[:3]:
+            try:
+                with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read(2000)
+                hits = [kw for kw in cred_keywords if kw in content.lower()]
+                if hits:
+                    evidence["credential_files"].append(filepath)
+                    evidence["findings"].append({"file": filepath, "keywords": hits})
+            except (PermissionError, OSError):
+                pass
+    evidence["artifacts"].append({
+        "type": "credential_scan",
+        "description": f"{len(evidence['credential_files'])} arquivos com possíveis credenciais",
+        "risk": "Plaintext credentials enable direct account compromise without brute force",
+    })
+    return evidence
+
+
+def _technique_screen_capture(target: str, mode: str) -> dict:
+    """T1113 — Screen Capture: testa capacidade de captura de tela."""
+    evidence = {"technique": "T1113", "screenshot_possible": False, "artifacts": []}
+    try:
+        import PIL.ImageGrab  # type: ignore
+        img = PIL.ImageGrab.grab()
+        w, h = img.size
+        evidence["screenshot_possible"] = True
+        evidence["screen_resolution"] = f"{w}x{h}"
+        evidence["artifacts"].append({
+            "type": "screen_capture_test",
+            "description": f"Screenshot possível — resolução {w}x{h}. PIL disponível.",
+            "risk": "Attacker can capture sensitive information from screen (credentials, documents, emails)",
+        })
+    except ImportError:
+        evidence["artifacts"].append({
+            "type": "screen_capture_test",
+            "description": "PIL não instalado — screen capture via Python não disponível",
+            "risk": "Low — requires additional tool staging",
+        })
+    except Exception as e:
+        evidence["artifacts"].append({
+            "type": "screen_capture_test",
+            "description": f"Erro ao testar: {e}",
+            "risk": "Unknown",
+        })
+    return evidence
+
+
 TECHNIQUE_HANDLERS = {
     "T1003": _technique_credential_access,
+    "T1007": _technique_service_discovery,
+    "T1012": _technique_registry_query,
     "T1016": _technique_network_config,
     "T1021": _technique_lateral_movement,
+    "T1033": _technique_system_owner,
     "T1041": _technique_exfiltration,
+    "T1049": _technique_network_connections,
+    "T1057": _technique_process_discovery,
     "T1059": _technique_execution,
     "T1070": _technique_indicator_removal,
     "T1082": _technique_discovery,
     "T1083": _technique_file_discovery,
     "T1087": _technique_account_discovery,
     "T1105": _technique_ingress_transfer,
+    "T1113": _technique_screen_capture,
+    "T1518": _technique_software_discovery,
     "T1547": _technique_persistence,
+    "T1552": _technique_unsecured_credentials,
 }
 
 
