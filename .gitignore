@@ -113,6 +113,7 @@ _edr_pending.json
 _kev_snapshot.json
 _kev_cache.json
 _epss_cache.json
+_benchmark_cache.json
 
 # Claude Code internals
 .claude/
