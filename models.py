@@ -369,3 +369,16 @@ class RemediationTicket(Base):
     resolved_at = Column(DateTime, nullable=True)
 
     user = relationship("User")
+
+
+class BenchmarkEntry(Base):
+    """Opt-in anonymous benchmark submission — stores client BAS scores per sector."""
+    __tablename__ = "benchmark_entries"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    sector = Column(String, nullable=False, index=True)
+    score = Column(Float, nullable=False)
+    techniques_total = Column(Integer, default=0)
+    techniques_passed = Column(Integer, default=0)
+    simulation_id = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)

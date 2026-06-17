@@ -4,6 +4,8 @@ Sector benchmark data seeded from public reports (Verizon DBIR 2024, IBM X-Force
 Used by the /api/bas/benchmark/{sector} endpoint.
 """
 from __future__ import annotations
+import os as _os
+import json as _json
 
 # Sector benchmark data — scores represent BAS simulation pass rates
 # Source basis: Verizon DBIR 2024, IBM X-Force 2024, Picus Security Red Report 2024
@@ -97,6 +99,10 @@ def get_benchmark(sector: str, client_score: float) -> dict:
     """
     key = sector.lower().strip()
     bench = SECTOR_BENCHMARKS.get(key)
+    # Try real client data first (overrides seed when >= 10 entries)
+    real = get_real_percentiles(key)
+    if real:
+        bench = {**bench, **real}
     if not bench:
         available = list(SECTOR_BENCHMARKS.keys())
         return {"error": f"Setor '{sector}' não encontrado. Disponíveis: {available}"}
@@ -159,3 +165,63 @@ def list_sectors() -> list[dict]:
         {"key": k, "name": v["name"], "avg_score": v["avg_score"], "sample_size": v["sample_size"]}
         for k, v in SECTOR_BENCHMARKS.items()
     ]
+
+
+# Path for the local real-data cache (SQLite is used for persistence; this is a fallback)
+_BENCH_CACHE = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "_benchmark_cache.json")
+
+
+def submit_score(sector: str, score: float, simulation_id: str | None = None) -> dict:
+    """
+    Persist a real client score submission to the local cache.
+    sector: key from SECTOR_BENCHMARKS
+    score: BAS score (0-100)
+    """
+    sector = sector.lower().strip()
+    if sector not in SECTOR_BENCHMARKS:
+        return {"error": f"Setor desconhecido: {sector}"}
+
+    try:
+        try:
+            with open(_BENCH_CACHE, "r", encoding="utf-8") as fh:
+                cache = _json.load(fh)
+        except Exception:
+            cache = {}
+
+        if sector not in cache:
+            cache[sector] = []
+
+        cache[sector].append({"score": score, "simulation_id": simulation_id})
+
+        # Keep last 500 entries per sector
+        cache[sector] = cache[sector][-500:]
+
+        with open(_BENCH_CACHE, "w", encoding="utf-8") as fh:
+            _json.dump(cache, fh)
+
+        return {"submitted": True, "sector": sector, "score": score, "total_entries": len(cache[sector])}
+    except Exception as exc:
+        return {"submitted": False, "error": str(exc)}
+
+
+def get_real_percentiles(sector: str) -> dict | None:
+    """
+    Compute percentiles from real submitted data.
+    Returns None if fewer than 10 real entries exist for the sector.
+    """
+    try:
+        with open(_BENCH_CACHE, "r", encoding="utf-8") as fh:
+            cache = _json.load(fh)
+        entries = [e["score"] for e in cache.get(sector, []) if isinstance(e.get("score"), (int, float))]
+        if len(entries) < 10:
+            return None
+        entries.sort()
+        n = len(entries)
+        p25 = entries[int(n * 0.25)]
+        p50 = entries[int(n * 0.50)]
+        p75 = entries[int(n * 0.75)]
+        p90 = entries[int(n * 0.90)]
+        avg = round(sum(entries) / n, 1)
+        return {"p25": round(p25, 1), "p50": round(p50, 1), "p75": round(p75, 1), "p90": round(p90, 1), "avg": avg, "sample_size": n, "source": "dados_reais_clientes"}
+    except Exception:
+        return None

@@ -24,7 +24,7 @@ except ImportError:
     _HAS_EPSS = False
 
 try:
-    from gap7_benchmark_data import get_benchmark, list_sectors
+    from gap7_benchmark_data import get_benchmark, list_sectors, submit_score
     _HAS_BENCH = True
 except ImportError:
     _HAS_BENCH = False
@@ -182,6 +182,25 @@ async def benchmark_sector(
     result = get_benchmark(sector, score)
     if "error" in result:
         raise HTTPException(404, result["error"])
+    return result
+
+
+class BenchmarkSubmitRequest(BaseModel):
+    sector: str
+    score: float
+    simulation_id: Optional[str] = None
+    opt_in: bool = True  # client must explicitly opt-in
+
+@ext_router_v6.post("/bas/benchmark/submit", tags=["Benchmarking"])
+async def benchmark_submit(req: BenchmarkSubmitRequest, current_user: User = Depends(get_current_user)):
+    """Submit current client BAS score for anonymous sector benchmarking (opt-in)."""
+    if not _HAS_BENCH:
+        raise HTTPException(503, "gap7_benchmark_data not available")
+    if not req.opt_in:
+        return {"submitted": False, "reason": "opt_in=false — dados não enviados"}
+    result = submit_score(req.sector, req.score, req.simulation_id)
+    if "error" in result:
+        raise HTTPException(400, result["error"])
     return result
 
 
