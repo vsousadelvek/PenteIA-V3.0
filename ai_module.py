@@ -1,8 +1,11 @@
 """Módulo de IA do PenteIA — motor de inferência para segurança ofensiva.
 
-Baseado em llama-cpp-python com modelos GGUF 3B que rodam bem em CPU.
+Prioridade de inferência:
+  1. Modelo GGUF local via llama-cpp-python (mais rápido, zero custo, offline)
+  2. Anthropic API — claude-haiku-4-5-20251001 (requer ANTHROPIC_API_KEY)
+  3. Keyword matching hardcoded (demo mode, sempre funciona)
 
-Modelos recomendados (Q4_K_M, baixar de HuggingFace):
+Modelos GGUF recomendados (Q4_K_M, baixar de HuggingFace):
   • Qwen2.5-3B-Instruct-Q4_K_M.gguf        (~1.9 GB) — mais rápido em CPU
   • Phi-3.5-mini-instruct-Q4_K_M.gguf      (~2.2 GB) — melhor qualidade
   • Llama-3.2-3B-Instruct-Q4_K_M.gguf      (~2.0 GB) — versão Meta
@@ -16,6 +19,7 @@ Configuração via variáveis de ambiente:
   PENTEIA_AI_DISABLED=1         (força modo demo sem LLM)
   PENTEIA_AI_TIMEOUT=60         (timeout por inferência em segundos)
   PENTEIA_AI_MAX_TOKENS=512     (máx tokens por resposta)
+  ANTHROPIC_API_KEY=sk-ant-... (ativa fallback Anthropic quando sem GGUF local)
 """
 from __future__ import annotations
 
@@ -26,11 +30,20 @@ import re
 import unicodedata
 from typing import Any, Generator
 
+# Carrega .env se python-dotenv estiver instalado
+try:
+    from dotenv import load_dotenv  # type: ignore[import-not-found]
+    load_dotenv(os.path.join(os.path.dirname(__file__), ".env"), override=False)
+except ImportError:
+    pass
+
 log = logging.getLogger(__name__)
 
 # ── Instância global ──────────────────────────────────────────────────────────
 _LLM: Any | None = None
 _LOAD_FAILED: bool = False
+_ANTHROPIC_CLIENT: Any | None = None
+_ANTHROPIC_FAILED: bool = False
 _EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=2, thread_name_prefix="penteia_ai"
 )
@@ -90,14 +103,59 @@ def get_llm():
         return None
 
 
+def get_anthropic():
+    global _ANTHROPIC_CLIENT, _ANTHROPIC_FAILED
+    if _ANTHROPIC_FAILED or _is_disabled():
+        return None
+    if _ANTHROPIC_CLIENT is not None:
+        return _ANTHROPIC_CLIENT
+    api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        return None
+    try:
+        import anthropic  # type: ignore[import-not-found]
+        _ANTHROPIC_CLIENT = anthropic.Anthropic(api_key=api_key)
+        log.info("[AI] Anthropic API configurada — modelo: claude-haiku-4-5-20251001")
+        return _ANTHROPIC_CLIENT
+    except ImportError:
+        log.warning("[AI] pacote 'anthropic' não instalado — pip install anthropic")
+        _ANTHROPIC_FAILED = True
+        return None
+    except Exception as e:
+        log.error(f"[AI] falha ao inicializar Anthropic: {e}")
+        _ANTHROPIC_FAILED = True
+        return None
+
+
+def _infer_anthropic(user_msg: str, max_tokens: int = 512, system: str = "") -> str:
+    client = get_anthropic()
+    if client is None:
+        return ""
+    try:
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=max_tokens,
+            system=system or _SYSTEM_PERSONA,
+            messages=[{"role": "user", "content": user_msg}],
+        )
+        return resp.content[0].text.strip()
+    except Exception as e:
+        log.warning(f"[AI] erro Anthropic API: {e}")
+        return ""
+
+
 def status() -> dict:
     llm = get_llm()
     path = _model_path()
+    anthropic_client = get_anthropic()
+
     if _is_disabled():
         return {"available": False, "reason": "disabled", "model": None, "demo_mode": True}
     if llm:
         model_name = os.path.basename(path or "")
-        return {"available": True, "reason": "ok", "model": model_name, "demo_mode": False}
+        return {"available": True, "reason": "gguf_local", "model": model_name, "demo_mode": False, "backend": "llama_cpp"}
+    if anthropic_client:
+        return {"available": True, "reason": "anthropic_api", "model": "claude-haiku-4-5-20251001", "demo_mode": False, "backend": "anthropic"}
     if not path:
         return {
             "available": False,
@@ -105,12 +163,13 @@ def status() -> dict:
             "demo_mode": True,
             "model": None,
             "install_hint": (
-                "Defina PENTEIA_AI_MODEL=/caminho/para/modelo.gguf\n"
-                "Modelos recomendados (Hugging Face):\n"
+                "Opção 1 — Anthropic API (recomendado): defina ANTHROPIC_API_KEY=sk-ant-...\n"
+                "Opção 2 — GGUF local: defina PENTEIA_AI_MODEL=/caminho/para/modelo.gguf\n"
+                "Modelos GGUF (Hugging Face):\n"
                 "  • Qwen/Qwen2.5-3B-Instruct-GGUF  Q4_K_M  ~1.9 GB\n"
                 "  • microsoft/Phi-3.5-mini-instruct-gguf  Q4_K_M  ~2.2 GB\n"
-                "  • meta-llama/Llama-3.2-3B-Instruct-GGUF  Q4_K_M  ~2.0 GB\n"
-                "pip install llama-cpp-python"
+                "pip install anthropic  # para Anthropic API\n"
+                "pip install llama-cpp-python  # para GGUF local"
             ),
         }
     return {"available": False, "reason": "load_failed", "model": path, "demo_mode": True}
@@ -191,23 +250,28 @@ def analyze_simulation(sim_data: dict) -> str:
 
     llm = get_llm()
 
+    tech_lines = "\n".join(
+        f"  - [{t.get('cvss_severity','?')}] {t.get('id','?')} {t.get('name','?')} (CVSS {t.get('cvss',0)})"
+        for t in crits[:8]
+    )
+    user_msg = (
+        f"Analise os resultados desta simulação BAS:\n\n"
+        f"Alvo: {target}\n"
+        f"Score de risco: {score:.1f}/100\n"
+        f"Técnicas testadas: {total} | Vulneráveis: {found} | Bloqueadas: {blocked}\n"
+        f"Técnicas críticas/altas encontradas:\n{tech_lines or '  (nenhuma)'}\n\n"
+        f"Escreva uma análise técnica com: (1) diagnóstico geral, (2) principais riscos, "
+        f"(3) vetor de ataque mais crítico, (4) recomendações prioritárias. Máx 300 palavras."
+    )
+
     if llm:
-        tech_lines = "\n".join(
-            f"  - [{t.get('cvss_severity','?')}] {t.get('id','?')} {t.get('name','?')} (CVSS {t.get('cvss',0)})"
-            for t in crits[:8]
-        )
-        prompt = _wrap_chat(
-            f"Analise os resultados desta simulação BAS:\n\n"
-            f"Alvo: {target}\n"
-            f"Score de risco: {score:.1f}/100\n"
-            f"Técnicas testadas: {total} | Vulneráveis: {found} | Bloqueadas: {blocked}\n"
-            f"Técnicas críticas/altas encontradas:\n{tech_lines or '  (nenhuma)'}\n\n"
-            f"Escreva uma análise técnica com: (1) diagnóstico geral, (2) principais riscos, "
-            f"(3) vetor de ataque mais crítico, (4) recomendações prioritárias. Máx 300 palavras."
-        )
-        result = _run_with_timeout(_infer, prompt, 600, 0.3)
+        result = _run_with_timeout(_infer, _wrap_chat(user_msg), 600, 0.3)
         if result:
             return result
+
+    result = _infer_anthropic(user_msg, max_tokens=600)
+    if result:
+        return result
 
     # Fallback demo
     level = "crítico" if score >= 75 else "alto" if score >= 50 else "médio" if score >= 30 else "baixo"
@@ -244,12 +308,17 @@ def security_chat(question: str, context: str = "") -> str:
     q = _clean(question, 600)
     llm = get_llm()
 
+    ctx_block = f"Contexto da plataforma: {_clean(context, 300)}\n\n" if context else ""
+    user_msg = f"{ctx_block}Pergunta: {q}\n\nResponda de forma técnica e objetiva."
+
     if llm:
-        ctx_block = f"Contexto da plataforma: {_clean(context, 300)}\n\n" if context else ""
-        prompt = _wrap_chat(f"{ctx_block}Pergunta: {q}\n\nResponda de forma técnica e objetiva.")
-        result = _run_with_timeout(_infer, prompt, 512, 0.4)
+        result = _run_with_timeout(_infer, _wrap_chat(user_msg), 512, 0.4)
         if result:
             return result
+
+    result = _infer_anthropic(user_msg, max_tokens=512)
+    if result:
+        return result
 
     # Fallback demo — respostas baseadas em palavras-chave
     q_lower = q.lower()
@@ -377,21 +446,26 @@ def generate_pentest_plan(target_info: dict) -> str:
 
     llm = get_llm()
 
+    user_msg = (
+        f"Crie um plano de pentest detalhado para:\n\n"
+        f"Alvo: {target or 'infraestrutura corporativa'}\n"
+        f"Escopo: {scope or 'rede interna + aplicações web'}\n"
+        f"Tecnologias: {tech or 'Windows AD, Linux, Web Apps'}\n"
+        f"Duração: {duration}\n"
+        f"Objetivo: {obj_type}\n\n"
+        f"Estruture como: Fase 1 Reconhecimento, Fase 2 Scanning, "
+        f"Fase 3 Exploração, Fase 4 Pós-exploração, Fase 5 Relatório. "
+        f"Inclua técnicas MITRE ATT&CK para cada fase. Máx 400 palavras."
+    )
+
     if llm:
-        prompt = _wrap_chat(
-            f"Crie um plano de pentest detalhado para:\n\n"
-            f"Alvo: {target or 'infraestrutura corporativa'}\n"
-            f"Escopo: {scope or 'rede interna + aplicações web'}\n"
-            f"Tecnologias: {tech or 'Windows AD, Linux, Web Apps'}\n"
-            f"Duração: {duration}\n"
-            f"Objetivo: {obj_type}\n\n"
-            f"Estruture como: Fase 1 Reconhecimento, Fase 2 Scanning, "
-            f"Fase 3 Exploração, Fase 4 Pós-exploração, Fase 5 Relatório. "
-            f"Inclua técnicas MITRE ATT&CK para cada fase. Máx 400 palavras."
-        )
-        result = _run_with_timeout(_infer, prompt, 700, 0.35)
+        result = _run_with_timeout(_infer, _wrap_chat(user_msg), 700, 0.35)
         if result:
             return result
+
+    result = _infer_anthropic(user_msg, max_tokens=700)
+    if result:
+        return result
 
     # Fallback estruturado
     t = target or "infraestrutura"
@@ -433,18 +507,23 @@ def remediation_steps(technique_id: str, technique_name: str, context: str = "")
 
     llm = get_llm()
 
+    user_msg = (
+        f"Gere passos de remediação detalhados para a técnica MITRE ATT&CK:\n\n"
+        f"ID: {tid}\nNome: {name}\n"
+        f"{('Contexto adicional: ' + ctx) if ctx else ''}\n\n"
+        f"Inclua: (1) configuração imediata, (2) monitoramento/detecção, "
+        f"(3) hardening de longo prazo, (4) referências (CIS, NIST). "
+        f"Formate como lista numerada. Máx 250 palavras."
+    )
+
     if llm:
-        prompt = _wrap_chat(
-            f"Gere passos de remediação detalhados para a técnica MITRE ATT&CK:\n\n"
-            f"ID: {tid}\nNome: {name}\n"
-            f"{('Contexto adicional: ' + ctx) if ctx else ''}\n\n"
-            f"Inclua: (1) configuração imediata, (2) monitoramento/detecção, "
-            f"(3) hardening de longo prazo, (4) referências (CIS, NIST). "
-            f"Formate como lista numerada. Máx 250 palavras."
-        )
-        result = _run_with_timeout(_infer, prompt, 500, 0.2)
+        result = _run_with_timeout(_infer, _wrap_chat(user_msg), 500, 0.2)
         if result:
             return result
+
+    result = _infer_anthropic(user_msg, max_tokens=500)
+    if result:
+        return result
 
     # Fallback por categoria de técnica
     t = tid.upper()
@@ -538,13 +617,16 @@ def threat_score(indicators: list[str]) -> dict:
 
     llm = get_llm()
     explanation = ""
-    if llm and (high or med):
+    if high or med:
         ioc_block = "\n".join(f"  - {i}" for i in matched_high[:4] + matched_med[:4])
-        prompt = _wrap_chat(
+        user_msg = (
             f"Analise estes indicadores de comprometimento (IOCs) e explique o risco:\n{ioc_block}\n\n"
             f"Score calculado: {score}/100. Dê um parágrafo de análise técnica. Máx 100 palavras."
         )
-        explanation = _run_with_timeout(_infer, prompt, 200, 0.3) or ""
+        if llm:
+            explanation = _run_with_timeout(_infer, _wrap_chat(user_msg), 200, 0.3) or ""
+        if not explanation:
+            explanation = _infer_anthropic(user_msg, max_tokens=200)
 
     if not explanation:
         if high > 0:
