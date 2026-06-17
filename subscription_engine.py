@@ -52,6 +52,73 @@ EXTRA_PACKS: dict = {
 
 RENEWAL_DAYS = 30
 
+# ---------------------------------------------------------------------------
+# Limites de força de ataque por plano
+# ---------------------------------------------------------------------------
+# free: suficiente pra derrubar um servidor simples (VPS pequena, app de teste)
+# Os limites são caps — o usuário pode pedir menos, nunca mais.
+
+ATTACK_LIMITS: dict = {
+    "free": {
+        "max_threads":     50,
+        "max_pps":         1_000,
+        "max_duration":    60,      # segundos
+        "max_connections": 300,     # Slowloris
+        "max_workers":     20,      # recon / BAS workers
+    },
+    "researcher": {
+        "max_threads":     200,
+        "max_pps":         10_000,
+        "max_duration":    300,
+        "max_connections": 2_000,
+        "max_workers":     100,
+    },
+    "pro": {
+        "max_threads":     500,
+        "max_pps":         50_000,
+        "max_duration":    600,
+        "max_connections": 5_000,
+        "max_workers":     300,
+    },
+    "business": {
+        "max_threads":     1_000,
+        "max_pps":         200_000,
+        "max_duration":    3_600,
+        "max_connections": 10_000,
+        "max_workers":     1_000,
+    },
+}
+
+
+def get_attack_limits(user) -> dict:
+    """Retorna os caps de força de ataque para o usuário (considera expiração)."""
+    plan_type = user.plan_type or "free"
+    now = datetime.utcnow()
+    if plan_type != "free" and user.plan_expires_at and user.plan_expires_at < now:
+        plan_type = "free"
+    return ATTACK_LIMITS.get(plan_type) or ATTACK_LIMITS["free"]
+
+
+def clamp_attack_params(user, **kwargs) -> dict:
+    """
+    Clamp parâmetros de ataque aos limites do plano.
+    Aceita: threads, pps, duration, connections, workers.
+    Retorna dict com os valores clampeados.
+    """
+    limits = get_attack_limits(user)
+    mapping = {
+        "threads":     "max_threads",
+        "pps":         "max_pps",
+        "duration":    "max_duration",
+        "connections": "max_connections",
+        "workers":     "max_workers",
+    }
+    result = {}
+    for param, limit_key in mapping.items():
+        if param in kwargs and kwargs[param] is not None:
+            result[param] = min(int(kwargs[param]), limits[limit_key])
+    return result
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -227,6 +294,7 @@ def get_user_billing_status(user, db: Session) -> dict:
     used = user.minutes_used or 0
     unlimited = quota is None
 
+    limits = get_attack_limits(user)
     return {
         "plan": plan_type,
         "plan_label": plan["label"],
@@ -241,4 +309,5 @@ def get_user_billing_status(user, db: Session) -> dict:
         "max_concurrent": plan["concurrent"],
         "active_attacks": _active_sessions_count(user.id, db),
         "price_brl": plan["price_brl"],
+        "attack_limits": limits,
     }

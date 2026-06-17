@@ -2672,12 +2672,21 @@ async def diag_ssh_proxy(req: SSHProxyTestRequest, current_user: User = Depends(
 
 @app.post("/api/ddos/start")
 async def start_ddos(req: DDoSStartRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    # Gate de tempo e simultaneidade
+    # Gate de tempo, simultaneidade e força
     try:
-        from subscription_engine import can_start_attack, open_session
+        from subscription_engine import can_start_attack, open_session, clamp_attack_params
         allowed, reason = can_start_attack(current_user, db)
         if not allowed:
             raise HTTPException(status_code=402, detail=reason)
+        clamped = clamp_attack_params(
+            current_user,
+            threads=req.threads, pps=req.pps,
+            duration=req.duration, connections=req.connections,
+        )
+        req.threads     = clamped.get("threads",     req.threads)
+        req.pps         = clamped.get("pps",         req.pps)
+        req.duration    = clamped.get("duration",    req.duration)
+        req.connections = clamped.get("connections", req.connections)
         open_session(current_user.id, "ddos", db)
     except HTTPException:
         raise
@@ -2958,6 +2967,14 @@ async def scan_ports(req: ReconScanRequest, current_user: User = Depends(get_cur
         portas = parse_portas(req.ports)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    # Clamp workers ao limite do plano
+    try:
+        from subscription_engine import clamp_attack_params
+        clamped = clamp_attack_params(current_user, workers=req.workers)
+        req.workers = clamped.get("workers", req.workers)
+    except Exception:
+        pass
 
     _cleanup_old_scan_tasks()
 

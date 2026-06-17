@@ -268,6 +268,54 @@ export default function Billing() {
           </div>
         </div>
 
+        {/* Força do ataque */}
+        {status?.attack_limits && (
+          <div className="mt-4 border border-dark-600 rounded-xl p-4">
+            <div className="flex items-center justify-between mb-3">
+              <p className="text-xs text-gray-500 uppercase tracking-wide font-semibold">Força máxima de ataque</p>
+              {currentPlan !== 'business' && (
+                <span className="text-xs text-blue-400 cursor-pointer hover:underline" onClick={() => document.getElementById('plans-section')?.scrollIntoView({behavior:'smooth'})}>
+                  Fazer upgrade ↓
+                </span>
+              )}
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              {[
+                { label: 'Threads', value: status.attack_limits.max_threads.toLocaleString(), why: 'Número de conexões paralelas. Mais threads = ataque mais intenso.' },
+                { label: 'Pacotes/s', value: status.attack_limits.max_pps.toLocaleString(), why: 'Pacotes por segundo enviados ao alvo. Limita a saturação de banda.' },
+                { label: 'Duração máx', value: `${status.attack_limits.max_duration}s`, why: 'Tempo máximo por sessão de ataque. Planos maiores = testes mais longos.' },
+                { label: 'Workers recon', value: status.attack_limits.max_workers.toLocaleString(), why: 'Threads paralelas em port scan e BAS. Mais workers = scan mais rápido.' },
+              ].map(item => (
+                <div key={item.label} className="bg-dark-800/60 rounded-lg p-3 group relative cursor-help">
+                  <p className="text-xs text-gray-500 mb-1">{item.label}</p>
+                  <p className={`text-lg font-bold ${meta.color}`}>{item.value}</p>
+                  <div className="absolute bottom-full left-0 mb-1 hidden group-hover:block z-10 w-52 bg-dark-700 border border-dark-500 rounded-lg p-2 text-xs text-gray-300 shadow-xl">
+                    {item.why}
+                    {currentPlan !== 'business' && (
+                      <span className="block mt-1 text-blue-400">Faça upgrade para aumentar.</span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+            {currentPlan === 'free' && (
+              <p className="text-xs text-gray-600 mt-3">
+                Suficiente para testar servidores simples. Para testes em infraestrutura real, faça upgrade para Researcher ou Pro.
+              </p>
+            )}
+            {currentPlan === 'researcher' && (
+              <p className="text-xs text-gray-600 mt-3">
+                Ideal para labs e alvos de médio porte. O plano Pro oferece 2,5× mais threads e 5× mais PPS para engajamentos maiores.
+              </p>
+            )}
+            {currentPlan === 'pro' && (
+              <p className="text-xs text-gray-600 mt-3">
+                Alto desempenho para auditorias. Business remove todos os limites com 1.000 threads e sem restrição de duração.
+              </p>
+            )}
+          </div>
+        )}
+
         {currentPlan === 'free' && (
           <div className="mt-4 flex items-start gap-2 bg-yellow-900/20 border border-yellow-800/40 rounded-lg p-3">
             <AlertTriangle className="w-4 h-4 text-yellow-400 flex-shrink-0 mt-0.5" />
@@ -283,7 +331,7 @@ export default function Billing() {
       </div>
 
       {/* Planos */}
-      <div>
+      <div id="plans-section">
         <h2 className="text-lg font-bold text-gray-100 mb-4">Planos mensais — tudo incluso</h2>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           {PLANS_ORDER.map(planKey => {
