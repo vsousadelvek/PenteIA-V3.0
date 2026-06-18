@@ -6779,6 +6779,13 @@ except Exception as _e:
     import logging as _logging
     _logging.getLogger("penteia").warning(f"billing_router not loaded: {_e}")
 
+try:
+    from ext_router_missing import missing_router as _missing_router
+    app.include_router(_missing_router, prefix="/api")
+except Exception as _e:
+    import logging as _logging
+    _logging.getLogger("penteia").warning(f"missing_router not loaded: {_e}")
+
 
 # ── Root ─────────────────────────────────────────────────────────────────────
 
