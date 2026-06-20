@@ -43,6 +43,12 @@ const MSSP = lazy(() => import('./pages/MSSP'))
 const ADAttacks = lazy(() => import('./pages/ADAttacks'))
 const Billing = lazy(() => import('./pages/Billing'))
 const Landing = lazy(() => import('./pages/Landing'))
+const K8sSecurity = lazy(() => import('./pages/K8sSecurity'))
+const APISecurity = lazy(() => import('./pages/APISecurity'))
+const OTSecurity = lazy(() => import('./pages/OTSecurity'))
+const ThreatIntel = lazy(() => import('./pages/ThreatIntel'))
+const BSaC = lazy(() => import('./pages/BSaC'))
+const CISODashboard = lazy(() => import('./pages/CISODashboard'))
 
 const SSOCallback = ({ onLoginSuccess }) => {
   const [status, setStatus] = React.useState('processing')
@@ -180,6 +186,12 @@ export default function App() {
                     <Route path="/mssp" element={<ProtectedRoute element={<MSSP />} />} />
                     <Route path="/ad-attacks" element={<ProtectedRoute element={<ADAttacks />} />} />
                     <Route path="/billing" element={<ProtectedRoute element={<Billing />} />} />
+                    <Route path="/k8s-security" element={<ProtectedRoute element={<K8sSecurity />} />} />
+                    <Route path="/api-security" element={<ProtectedRoute element={<APISecurity />} />} />
+                    <Route path="/ot-security" element={<ProtectedRoute element={<OTSecurity />} />} />
+                    <Route path="/threat-intel" element={<ProtectedRoute element={<ThreatIntel />} />} />
+                    <Route path="/bsac" element={<ProtectedRoute element={<BSaC />} />} />
+                    <Route path="/ciso-dashboard" element={<ProtectedRoute element={<CISODashboard />} />} />
                     <Route path="/sso-callback" element={<SSOCallback onLoginSuccess={handleLoginSuccess} />} />
                   </Routes>
                 </Suspense>

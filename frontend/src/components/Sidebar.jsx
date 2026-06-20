@@ -6,7 +6,7 @@ import {
   ChevronLeft, ChevronRight, X, Crosshair, Bell, Database, Grid,
   Globe, Package, Mail, ShieldCheck, Wrench, Link2, DollarSign, Fingerprint, Brain,
   Key, Building2, BookOpen, Swords, Calendar, Flag, Terminal, Users,
-  Server, Briefcase, CreditCard,
+  Server, Briefcase, CreditCard, Cpu, GitBranch, Box,
 } from 'lucide-react'
 import { useEnv, saveEnv } from '../hooks/useEnv'
 import api from '../api'
@@ -39,8 +39,10 @@ const GROUPS = [
       { path: '/campaign', label: 'Campanha', Icon: FlaskConical },
       { path: '/apt', label: 'APT Emulation', Icon: Crosshair },
       { path: '/ad-attacks', label: 'AD Attacks', Icon: Server },
+      { path: '/k8s-security', label: 'K8s Security', Icon: Box },
+      { path: '/api-security', label: 'API Security', Icon: Globe },
+      { path: '/ot-security', label: 'OT / ICS', Icon: Cpu },
       { path: '/playbook-builder', label: 'Playbook Builder', Icon: Layers },
-      { path: '/br-fiscal', label: 'BAS Brasil 🇧🇷', Icon: Package },
     ],
   },
   {
@@ -70,12 +72,14 @@ const GROUPS = [
     items: [
       { path: '/ai', label: 'IA / ML', Icon: Brain },
       { path: '/ai-scenarios', label: 'AI Scenarios', Icon: Zap },
+      { path: '/threat-intel', label: 'Threat Intel', Icon: Radio },
     ],
   },
   {
     label: 'Resultados',
     items: [
       { path: '/reporting', label: 'Relatórios', Icon: FileText },
+      { path: '/ciso-dashboard', label: 'CISO Dashboard', Icon: BarChart3 },
       { path: '/integrations', label: 'Integrações', Icon: Link2 },
       { path: '/api-keys', label: 'API Keys', Icon: Key },
     ],
@@ -90,6 +94,7 @@ const GROUPS = [
     label: 'Automação',
     items: [
       { path: '/scheduled-bas', label: 'BAS Agendado', Icon: Calendar },
+      { path: '/bsac', label: 'BSaC / CI-CD', Icon: GitBranch },
     ],
   },
   {

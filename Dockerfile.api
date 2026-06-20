@@ -1,16 +1,39 @@
-FROM python:3.11-slim
+# syntax=docker/dockerfile:1
+FROM python:3.11-slim AS base
+
+# Security: create non-root user early
+RUN groupadd --gid 1001 appgroup && \
+    useradd --uid 1001 --gid appgroup --shell /bin/bash --create-home appuser
 
 WORKDIR /app
 
+# Install runtime deps only (no build tools in final image)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential gcc nmap curl \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
+# Install Python deps as root (into /usr/local)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+# Copy application code
+COPY --chown=appuser:appgroup . .
+
+# Create writable dirs that the app needs
+RUN mkdir -p /app/uploads /app/evidence /data && \
+    chown -R appuser:appgroup /app /data
+
+# Switch to non-root
+USER appuser
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app_fastapi_v2:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+  CMD curl -f http://localhost:8000/api/health || exit 1
+
+CMD ["uvicorn", "app_fastapi_v2:app", \
+     "--host", "0.0.0.0", \
+     "--port", "8000", \
+     "--workers", "2", \
+     "--access-log", \
+     "--log-level", "info"]

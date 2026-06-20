@@ -52,7 +52,6 @@ networkx>=3.1                  # Graph visualization (attack paths)
 
 # Opcional (apenas para o motor neural --engine lstm: BiLSTM + Attention)
 # Instale com: pip install torch
-torch>=2.0.0
 
 # ============================================================================
 # Ferramentas recomendadas para produção
@@ -65,3 +64,11 @@ torch>=2.0.0
 
 # Para C2 avançado:
 # asyncio, aiohttp                # Async HTTP (já em stdlib)
+
+# ============================================================================
+# PenteIA v4.0 Round 3-5 additions
+# ============================================================================
+anthropic>=0.109.0              # AI scenario generation (Claude Haiku)
+python-dotenv>=1.0.0            # Load .env files
+APScheduler>=3.10.0             # Scheduled BAS automation
+stripe>=7.0.0                   # Billing (optional)
